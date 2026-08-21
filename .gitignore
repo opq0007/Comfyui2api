@@ -20,5 +20,8 @@ frontend/dist/
 .tmp-*
 .pack-*
 
-comfyui-api-workflows/*.json
-comfyui-api-workflows/.comfyui2api
+.omo/
+.codegraph/
+src/comfyui2api/webui_dist/
+
+

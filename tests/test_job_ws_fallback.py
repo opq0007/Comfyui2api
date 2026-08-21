@@ -21,34 +21,34 @@ class JobWebsocketFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             runs_dir = Path(tmp)
-            manager = jobs_module.JobManager(
-                cfg=SimpleNamespace(
-                    worker_concurrency=1,
-                    runs_dir=runs_dir,
-                    timeout_s=30,
-                    poll_interval_s=0.01,
-                ),
-                registry=SimpleNamespace(),
-                comfy=SimpleNamespace(
-                    object_info=AsyncMock(return_value={}),
-                    queue_prompt=AsyncMock(return_value=QueuedPrompt(prompt_id="prompt-1", client_id="client-1", number=1)),
-                    wait_for_history_complete=AsyncMock(
-                        return_value={
-                            "outputs": {
-                                "save-node": {
-                                    "images": [
-                                        {
-                                            "filename": "result.png",
-                                            "subfolder": "",
-                                            "type": "output",
-                                        }
-                                    ]
-                                }
+            from tests.helpers import fake_job_deps
+
+            client = SimpleNamespace(
+                object_info=AsyncMock(return_value={}),
+                queue_prompt=AsyncMock(return_value=QueuedPrompt(prompt_id="prompt-1", client_id="client-1", number=1)),
+                wait_for_history_complete=AsyncMock(
+                    return_value={
+                        "outputs": {
+                            "save-node": {
+                                "images": [
+                                    {
+                                        "filename": "result.png",
+                                        "subfolder": "",
+                                        "type": "output",
+                                    }
+                                ]
                             }
                         }
-                    ),
-                    view_bytes=AsyncMock(return_value=b"png-bytes"),
+                    }
                 ),
+                view_bytes=AsyncMock(return_value=b"png-bytes"),
+            )
+            deps = fake_job_deps(client=client, runs_dir=runs_dir)
+            manager = jobs_module.JobManager(
+                cfg=deps.cfg,
+                registry=SimpleNamespace(),
+                pool=deps.pool,
+                backend=deps.backend,
             )
 
             workflow = SimpleNamespace(
@@ -71,7 +71,7 @@ class JobWebsocketFallbackTests(unittest.IsolatedAsyncioTestCase):
             ), patch.object(
                 jobs_module.logger, "warning"
             ) as mock_warning:
-                await manager._run_job(job.job_id)
+                await manager._run_job(job.job_id, client=client)
 
         updated = await manager.get_job(job.job_id)
         self.assertIsNotNone(updated)

@@ -47,6 +47,8 @@ export function TaskPreviewDrawer({ task, detail, loading, onClose }: TaskPrevie
           <Info label="耗时" value={formatDuration(current.duration_s)} />
           <Info label="平台" value={current.platform} />
           <Info label="类型" value={kindLabels[current.kind] ?? current.kind} />
+          <Info label="模型" value={current.model_slug ?? current.requested_model ?? "--"} />
+          <Info label="实例" value={current.instance_slug ?? "排队中"} />
           <Info label="prompt_id" value={current.prompt_id ? compactId(current.prompt_id, 18) : "--"} />
           <Info label="queue_number" value={String(current.queue_number ?? "--")} />
           <Info label="提交时间" value={formatDateTime(current.created_at_utc)} />

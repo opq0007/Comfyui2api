@@ -34,8 +34,7 @@ export function SettingsPanel({
         </section>
         <section className="settings-section">
           <h3>服务状态</h3>
-          <RuntimeLine label="ComfyUI" value={stats?.comfyui_base_url} />
-          <RuntimeLine label="Workers" value={String(stats?.worker_concurrency ?? "--")} />
+          <RuntimeLine label="健康实例" value={`${stats?.healthy_instance_count ?? 0}/${stats?.instance_count ?? 0}`} />
           <RuntimeLine label="Web UI" value={stats?.ui_enabled ? "启用" : "禁用"} />
         </section>
         <section className="settings-section badges-row">

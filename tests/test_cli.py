@@ -19,9 +19,26 @@ class CliTests(unittest.TestCase):
     def test_parse_args_defaults_to_ui_command_later(self) -> None:
         args = parse_args([])
         self.assertIsNone(args.command)
+        self.assertEqual(args.host, "")
+        self.assertEqual(args.port, 0)
+        self.assertFalse(args.no_open)
+        self.assertFalse(args.disable_ui)
+        self.assertEqual(args.log_level, "info")
+
+    def test_main_no_args_defaults_to_ui_without_crashing(self) -> None:
+        with patch.dict(os.environ, {"API_TOKEN": "api", "ADMIN_TOKEN": "admin"}, clear=True), patch(
+            "comfyui2api.__main__.open_browser_later"
+        ) as mock_open, patch("comfyui2api.__main__._serve_app") as mock_serve:
+            main([])
+
+            mock_open.assert_called_once_with("http://127.0.0.1:8000/ui")
+            self.assertEqual(os.environ["API_LISTEN"], "127.0.0.1")
+            self.assertEqual(os.environ["API_PORT"], "8000")
+            self.assertEqual(mock_serve.call_args.kwargs["host"], "127.0.0.1")
+            self.assertEqual(mock_serve.call_args.kwargs["port"], 8000)
 
     def test_ui_mode_sets_localhost_and_opens_browser(self) -> None:
-        with patch.dict(os.environ, {}, clear=True), patch("comfyui2api.__main__.open_browser_later") as mock_open, patch(
+        with patch.dict(os.environ, {"API_TOKEN": "api", "ADMIN_TOKEN": "admin"}, clear=True), patch("comfyui2api.__main__.open_browser_later") as mock_open, patch(
             "comfyui2api.__main__._serve_app"
         ) as mock_serve:
             main(["ui", "--port", "9010"])
@@ -32,7 +49,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(mock_serve.call_args.kwargs["host"], "127.0.0.1")
 
     def test_serve_disable_ui_sets_environment(self) -> None:
-        with patch.dict(os.environ, {"API_LISTEN": "1.2.3.4", "API_PORT": "8001"}, clear=True), patch(
+        with patch.dict(os.environ, {"API_TOKEN": "api", "ADMIN_TOKEN": "admin", "API_LISTEN": "1.2.3.4", "API_PORT": "8001"}, clear=True), patch(
             "comfyui2api.__main__.open_browser_later"
         ) as mock_open, patch("comfyui2api.__main__._serve_app") as mock_serve:
             main(["serve", "--disable-ui"])

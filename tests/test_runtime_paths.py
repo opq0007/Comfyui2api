@@ -25,7 +25,7 @@ class RuntimePathTests(unittest.TestCase):
             os.environ,
             {
                 "API_TOKEN": "api-token",
-                "ADMIN_TOKEN": "",
+                "ADMIN_TOKEN": "admin-token",
                 "DATA_DIR": str(PROJECT_ROOT / "tmp-data"),
                 "DATABASE_PATH": str(PROJECT_ROOT / "tmp-data" / "tasks.db"),
                 "COMFYUI2API_DISABLE_UI": "1",
@@ -34,7 +34,7 @@ class RuntimePathTests(unittest.TestCase):
         ):
             cfg = load_config()
 
-        self.assertEqual(cfg.admin_token, "api-token")
+        self.assertEqual(cfg.admin_token, "admin-token")
         self.assertEqual(cfg.data_dir, PROJECT_ROOT / "tmp-data")
         self.assertEqual(cfg.database_path, PROJECT_ROOT / "tmp-data" / "tasks.db")
         self.assertFalse(cfg.ui_enabled)

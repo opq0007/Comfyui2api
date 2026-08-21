@@ -13,8 +13,8 @@ export function TokenGate({ onSubmit }: TokenGateProps): React.ReactElement {
     <main className="token-page">
       <section className="token-card">
         <div className="brand-mark">C</div>
-        <h1>需要访问令牌</h1>
-        <p>输入 API_TOKEN 或 ADMIN_TOKEN 后进入本地控制台。</p>
+        <h1>需要管理密钥</h1>
+        <p>输入 ADMIN_TOKEN 后进入控制台。关闭标签页后需要重新输入。</p>
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -27,7 +27,7 @@ export function TokenGate({ onSubmit }: TokenGateProps): React.ReactElement {
               type="password"
               value={token}
               onChange={(event) => setToken(event.target.value)}
-              placeholder="API Token / Admin Token"
+              placeholder="ADMIN_TOKEN"
               autoFocus
             />
           </label>
@@ -35,7 +35,7 @@ export function TokenGate({ onSubmit }: TokenGateProps): React.ReactElement {
             进入控制台
           </button>
         </form>
-        <small>UI 模式默认仅监听 127.0.0.1；公网监听建议启用 ADMIN_TOKEN。</small>
+        <small>公网管理台仅接受 ADMIN_TOKEN，不再回退 API_TOKEN。</small>
       </section>
       <section className="token-preview" aria-hidden="true">
         <span>

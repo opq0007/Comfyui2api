@@ -5,7 +5,6 @@ import base64
 import ipaddress
 import json
 import logging
-import re
 import socket
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -27,35 +26,31 @@ from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .comfy_client import ComfyUIClient
-from .comfy_workflow import (
-    extract_prompt_and_extra,
-    find_load_image_targets,
-    find_text_prompt_targets,
-    pick_unique_load_image_target,
-    pick_unique_target,
-)
-from .config import Config, load_config
+from .admin_limiter import AdminAuthLimiter
 from .admin_routes import create_admin_router
+from .backend_store import BackendStore
+from .config import Config, load_config
+from .input_staging import stage_input_image
+from .instance_pool import InstancePool
 from .job_retention import run_job_retention_forever
+from .job_scheduler import STAGED_PREFIX
 from .job_store import JobStore
 from .jobs import JobManager
+from .model_catalog import (
+    KindMismatchError,
+    ModelCatalog,
+    ModelNotFoundError,
+    NoAvailableBackendError,
+    WorkflowUnavailableError,
+)
 from .signed_urls import create_signed_query, has_valid_signature, signing_secret
 from .util import (
     bearer_authorized,
     decode_data_url_base64,
-    guess_image_ext,
     guess_media_type,
-    sanitize_filename_part,
-    save_input_image,
     utc_now_unix,
 )
-from .workflow_params import (
-    STANDARD_PARAMETER_ORDER,
-    detect_parameter_candidates,
-    generate_parameter_template,
-    public_parameter_spec,
-)
+from .workflow_params import STANDARD_PARAMETER_ORDER
 from .workflow_registry import WorkflowRegistry
 
 
@@ -66,10 +61,13 @@ def _openai_error(
     message: str,
     *,
     code: str = "invalid_request_error",
+    error_code: str | None = None,
     http_status: int = 400,
     extra: Mapping[str, Any] | None = None,
 ) -> HTTPException:
     error = {"message": message, "type": code}
+    if error_code:
+        error["code"] = error_code
     if extra:
         error.update(extra)
     return HTTPException(
@@ -259,62 +257,25 @@ async def _collect_workflow_request_params(
     return params
 
 
-def _extract_status_code(error_message: str) -> int | None:
-    match = re.search(r"status=(\d{3})", error_message or "")
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
-def _workflow_supports_kind(wf: Any, kind: str) -> bool:
-    caps = getattr(wf, "capabilities", None)
-    if caps is None:
-        return True
-    if kind == "txt2img":
-        return bool(getattr(caps, "has_save_image", False))
-    if kind == "img2img":
-        return bool(getattr(caps, "has_save_image", False) and getattr(caps, "has_load_image", False))
-    if kind == "txt2video":
-        return bool(getattr(caps, "has_save_video", False))
-    if kind == "img2video":
-        return bool(getattr(caps, "has_save_video", False) and getattr(caps, "has_load_image", False))
-    return True
-
-
-def _workflow_kind_error_message(*, wf: Any, kind: str) -> str:
-    caps = getattr(wf, "capabilities", None)
-    detected_kind = getattr(caps, "kind", "unknown") if caps is not None else "unknown"
-    missing: list[str] = []
-    if kind in {"img2img", "img2video"} and not getattr(caps, "has_load_image", False):
-        missing.append("missing LoadImage")
-    if kind in {"txt2img", "img2img"} and not getattr(caps, "has_save_image", False):
-        missing.append("missing SaveImage")
-    if kind in {"txt2video", "img2video"} and not getattr(caps, "has_save_video", False):
-        missing.append("missing SaveVideo")
-
-    detail = f"detected kind={detected_kind}"
-    if missing:
-        detail += f"; {', '.join(missing)}"
-    return f"Workflow '{wf.name}' does not support {kind} ({detail})."
-
-
 def create_app() -> FastAPI:
     cfg = load_config()
     registry = WorkflowRegistry(cfg.workflows_dir)
-    comfy = ComfyUIClient(cfg.comfy_base_url, http_timeout_s=cfg.http_timeout_s)
     store = JobStore(cfg.database_path)
-    jobs = JobManager(cfg=cfg, registry=registry, comfy=comfy, store=store)
+    backend = BackendStore(cfg.database_path)
+    pool = InstancePool(cfg=cfg, store=backend)
+    catalog = ModelCatalog(store=backend, pool=pool, registry=registry)
+    jobs = JobManager(cfg=cfg, registry=registry, pool=pool, backend=backend, store=store)
 
     app = FastAPI(title="comfyui2api", version="0.1.0")
     app.add_middleware(MaxBodySizeMiddleware, max_body_bytes=cfg.max_body_bytes)
     app.state.cfg = cfg
     app.state.registry = registry
-    app.state.comfy = comfy
     app.state.jobs = jobs
     app.state.job_store = store
+    app.state.backend = backend
+    app.state.pool = pool
+    app.state.catalog = catalog
+    app.state.admin_limiter = AdminAuthLimiter()
     app.include_router(create_admin_router())
 
     cfg.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -329,19 +290,9 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _startup() -> None:
         await store.init()
+        await backend.init()
         await store.mark_unfinished_interrupted()
-        if not cfg.admin_token and cfg.api_listen not in {"127.0.0.1", "localhost", "::1"}:
-            logger.warning(
-                "Admin API is not protected by ADMIN_TOKEN or API_TOKEN while API_LISTEN=%s.",
-                cfg.api_listen,
-            )
-        if cfg.comfyui_startup_check:
-            try:
-                await comfy.system_stats()
-            except Exception as exc:
-                raise RuntimeError(
-                    f"ComfyUI startup check failed for COMFYUI_BASE_URL={cfg.comfy_base_url}: {exc}"
-                ) from exc
+        await pool.start()
         await registry.load_all()
         if cfg.enable_workflow_watch:
             app.state.workflow_watch_task = asyncio.create_task(registry.watch_forever(), name="workflow-watch")
@@ -368,7 +319,7 @@ def create_app() -> FastAPI:
             t.cancel()
             await asyncio.gather(t, return_exceptions=True)
         await jobs.stop_workers()
-        await comfy.aclose()
+        await pool.aclose()
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -401,35 +352,6 @@ def create_app() -> FastAPI:
             raise _openai_error("Output file missing", http_status=500)
 
         return FileResponse(path=str(path), media_type=pick.media_type or guess_media_type(pick.filename), filename=pick.filename)
-
-    @app.get("/v1/workflows")
-    async def list_workflows(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-        _require_auth(cfg, authorization)
-        items = []
-        for wf in await registry.list():
-            items.append(
-                {
-                    "name": wf.name,
-                    "kind": wf.capabilities.kind,
-                    "mtime_ns": wf.mtime_ns,
-                    "available": True,
-                    "load_error": None,
-                    "parameter_error": wf.parameter_error,
-                }
-            )
-        for load_error in await registry.list_load_errors():
-            items.append(
-                {
-                    "name": load_error.name,
-                    "kind": None,
-                    "mtime_ns": load_error.mtime_ns,
-                    "available": False,
-                    "load_error": load_error.error,
-                    "parameter_error": None,
-                }
-            )
-        items.sort(key=lambda item: str(item.get("name") or "").lower())
-        return {"workflows_dir": str(cfg.workflows_dir), "items": items}
 
     async def _find_workflow_load_error(name: str):
         requested = (name or "").strip()
@@ -479,142 +401,51 @@ def create_app() -> FastAPI:
 
         raise _openai_error("Workflow not found", http_status=404)
 
-    async def _resolve_workflow_for_kind(*, kind: str, requested_name: str) -> Any:
-        resolved_name = (requested_name or "").strip() or await _pick_default_workflow(kind)
-        wf = await _resolve_workflow_name(resolved_name)
-        if not _workflow_supports_kind(wf, kind):
-            raise _openai_error(_workflow_kind_error_message(wf=wf, kind=kind), http_status=400)
-        return wf
+    def _raise_catalog(exc: Exception) -> None:
+        if isinstance(exc, ModelNotFoundError):
+            raise _openai_error(
+                str(exc),
+                code="invalid_request_error",
+                error_code="model_not_found",
+                http_status=404,
+            ) from exc
+        if isinstance(exc, WorkflowUnavailableError):
+            raise _openai_error(
+                str(exc),
+                code="invalid_request_error",
+                error_code="workflow_unavailable",
+                http_status=400,
+            ) from exc
+        if isinstance(exc, NoAvailableBackendError):
+            raise _openai_error(
+                str(exc),
+                code="server_error",
+                error_code="no_available_backend",
+                http_status=503,
+            ) from exc
+        if isinstance(exc, KindMismatchError):
+            raise _openai_error(str(exc), http_status=400) from exc
+        raise exc
 
-    @app.get("/v1/workflows/{name}/targets")
-    async def workflow_targets(name: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-        _require_auth(cfg, authorization)
-        wf = await _resolve_workflow_name(name)
-
-        prompt, _extra_data = extract_prompt_and_extra(wf.workflow_obj)
-        pos, neg = find_text_prompt_targets(prompt)
-        img = find_load_image_targets(prompt)
-
-        def _as_candidates(items: list[tuple[str, str, str, str]]) -> list[dict[str, Any]]:
-            out: list[dict[str, Any]] = []
-            for node_id, input_key, cls, title in items:
-                out.append(
-                    {
-                        "ref": f"{node_id}.{input_key}",
-                        "node_id": node_id,
-                        "input_key": input_key,
-                        "class_type": cls,
-                        "title": title or None,
-                    }
-                )
-            return out
-
-        def _try_pick_text(kind: str, candidates: list[tuple[str, str, str, str]]) -> tuple[str | None, str | None]:
-            try:
-                node_id, input_key = pick_unique_target(kind=kind, candidates=candidates)
-                return f"{node_id}.{input_key}", None
-            except Exception as e:
-                return None, str(e)
-
-        def _try_pick_image(candidates: list[tuple[str, str, str, str]]) -> tuple[str | None, str | None]:
-            try:
-                node_id, input_key = pick_unique_load_image_target(candidates)
-                return f"{node_id}.{input_key}", None
-            except Exception as e:
-                return None, str(e)
-
-        pos_auto, pos_err = _try_pick_text("positive", pos)
-        neg_auto, neg_err = _try_pick_text("negative", neg)
-        img_auto, img_err = _try_pick_image(img)
-
-        return {
-            "workflow": {"name": wf.name, "kind": wf.capabilities.kind, "mtime_ns": wf.mtime_ns},
-            "targets": {
-                "positive_prompt": {"autodetect": pos_auto, "autodetect_error": pos_err, "candidates": _as_candidates(pos)},
-                "negative_prompt": {"autodetect": neg_auto, "autodetect_error": neg_err, "candidates": _as_candidates(neg)},
-                "image": {"autodetect": img_auto, "autodetect_error": img_err, "candidates": _as_candidates(img)},
-            },
-        }
-
-    @app.get("/v1/workflows/{name}/parameters")
-    async def workflow_parameters(name: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-        _require_auth(cfg, authorization)
-        wf = await _resolve_workflow_name(name)
-        suggested_template = generate_parameter_template(
-            workflow_obj=wf.workflow_obj,
-            kind=wf.capabilities.kind,
-            spec=wf.parameter_spec,
-        )
-        return {
-            "workflow": {"name": wf.name, "kind": wf.capabilities.kind, "mtime_ns": wf.mtime_ns},
-            "parameter_mapping": public_parameter_spec(wf.parameter_spec),
-            "detected_candidates": detect_parameter_candidates(wf.workflow_obj),
-            "suggested_template": suggested_template,
-            "parameter_error": wf.parameter_error,
-        }
-
-    @app.get("/v1/workflows/{name}/parameters/template")
-    async def workflow_parameters_template(name: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-        _require_auth(cfg, authorization)
-        wf = await _resolve_workflow_name(name)
-        return {
-            "workflow": {"name": wf.name, "kind": wf.capabilities.kind, "mtime_ns": wf.mtime_ns},
-            "template": generate_parameter_template(
-                workflow_obj=wf.workflow_obj,
-                kind=wf.capabilities.kind,
-                spec=wf.parameter_spec,
-            ),
-            "parameter_error": wf.parameter_error,
-        }
-
-    def _build_upload_filename(*, job_id: str, data: bytes, filename_hint: str | None) -> str:
-        ext = ""
-        stem = "image"
-        if filename_hint:
-            p = Path(filename_hint)
-            ext = p.suffix
-            stem = p.stem or stem
-
-        ext = (ext or guess_image_ext(data)).lower()
-        if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
-            ext = guess_image_ext(data)
-        if ext == ".jpeg":
-            ext = ".jpg"
-
-        safe_stem = sanitize_filename_part(stem, max_len=60)
-        safe_prefix = sanitize_filename_part(job_id[:12], max_len=12)
-        return f"{safe_prefix}--{safe_stem}{ext}"
+    async def _resolve_public_model(*, model: str, kind: str | None, has_image: bool):
+        try:
+            return await catalog.resolve(slug=model, kind=kind, has_image=has_image)
+        except (ModelNotFoundError, WorkflowUnavailableError, NoAvailableBackendError, KindMismatchError) as exc:
+            _raise_catalog(exc)
+            raise
 
     async def _store_input_image_bytes(*, data: bytes, filename_hint: str | None) -> str:
-        mode = (cfg.image_upload_mode or "auto").strip().lower()
-        if mode not in {"auto", "comfy", "local"}:
-            mode = "auto"
-
-        if len(data) > max(1, int(cfg.max_image_bytes)):
-            raise _openai_error(f"Image too large ({len(data)} bytes)", http_status=413)
-
-        if mode in {"auto", "comfy"}:
-            try:
-                upload_name = _build_upload_filename(job_id=_uuid_now_hex(), data=data, filename_hint=filename_hint)
-                return await comfy.upload_image_bytes(
-                    data=data,
-                    filename=upload_name,
-                    subfolder=cfg.input_subdir,
-                    folder_type="input",
-                    overwrite=True,
-                )
-            except Exception:
-                if mode == "comfy":
-                    raise
-
-        return save_input_image(
-            input_dir=cfg.comfyui_input_dir,
-            subdir=cfg.input_subdir,
-            job_id=_uuid_now_hex(),
-            data=data,
-            filename_hint=filename_hint,
-            max_bytes=cfg.max_image_bytes,
-        )
+        try:
+            path = stage_input_image(
+                runs_dir=cfg.runs_dir,
+                data=data,
+                filename_hint=filename_hint,
+                max_bytes=cfg.max_image_bytes,
+                name_prefix=_uuid_now_hex(),
+            )
+        except ValueError as exc:
+            raise _openai_error(str(exc), http_status=413) from exc
+        return f"{STAGED_PREFIX}{path}"
 
     def _is_global_public_ip(host: str) -> bool:
         try:
@@ -860,37 +691,6 @@ def create_app() -> FastAPI:
 
         return prompt, image_value
 
-    def _pick_chat_generation_kind(*, wf: Any, has_image: bool) -> str:
-        detected_kind = str(getattr(getattr(wf, "capabilities", None), "kind", "") or "").strip().lower()
-        if has_image:
-            if detected_kind == "img2video" and _workflow_supports_kind(wf, "img2video"):
-                return "img2video"
-            if detected_kind == "img2img" and _workflow_supports_kind(wf, "img2img"):
-                return "img2img"
-            if _workflow_supports_kind(wf, "img2video") and not _workflow_supports_kind(wf, "img2img"):
-                return "img2video"
-            if _workflow_supports_kind(wf, "img2img") and not _workflow_supports_kind(wf, "img2video"):
-                return "img2img"
-            if _workflow_supports_kind(wf, "img2video"):
-                return "img2video"
-            if _workflow_supports_kind(wf, "img2img"):
-                return "img2img"
-            raise _openai_error(_workflow_kind_error_message(wf=wf, kind="img2video"), http_status=400)
-
-        if detected_kind == "txt2video" and _workflow_supports_kind(wf, "txt2video"):
-            return "txt2video"
-        if detected_kind == "txt2img" and _workflow_supports_kind(wf, "txt2img"):
-            return "txt2img"
-        if _workflow_supports_kind(wf, "txt2video") and not _workflow_supports_kind(wf, "txt2img"):
-            return "txt2video"
-        if _workflow_supports_kind(wf, "txt2img") and not _workflow_supports_kind(wf, "txt2video"):
-            return "txt2img"
-        if _workflow_supports_kind(wf, "txt2video"):
-            return "txt2video"
-        if _workflow_supports_kind(wf, "txt2img"):
-            return "txt2img"
-        raise _openai_error(_workflow_kind_error_message(wf=wf, kind="txt2img"), http_status=400)
-
     def _chat_completion_response(*, model: str, content_payload: Mapping[str, Any]) -> Dict[str, Any]:
         return {
             "id": f"chatcmpl_{_uuid_now_hex()}",
@@ -913,18 +713,7 @@ def create_app() -> FastAPI:
     @app.get("/v1/models")
     async def openai_models(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
         _require_auth(cfg, authorization)
-        data = []
-        for wf in await registry.list():
-            data.append(
-                {
-                    "id": Path(wf.name).stem,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "comfyui",
-                    "metadata": {"kind": wf.capabilities.kind},
-                }
-            )
-        return {"object": "list", "data": data}
+        return {"object": "list", "data": [item.as_openai() for item in await catalog.list_public()]}
 
     @app.post("/v1/chat/completions")
     async def openai_chat_completions(
@@ -939,9 +728,8 @@ def create_app() -> FastAPI:
 
         requested_model = str(body.get("model") or "").strip()
         if not requested_model:
-            raise _openai_error("Missing 'model'")
+            raise _openai_error("Missing 'model'", error_code="model_not_found", http_status=404)
 
-        wf = await _resolve_workflow_name(requested_model)
         prompt = str(body.get("prompt") or "").strip()
         image_value = _clean_optional_value(body.get("image"))
         if image_value is not None:
@@ -955,7 +743,13 @@ def create_app() -> FastAPI:
         if not prompt:
             raise _openai_error("Missing prompt text in 'messages'")
 
-        kind = _pick_chat_generation_kind(wf=wf, has_image=bool(image_value))
+        resolved = await _resolve_public_model(
+            model=requested_model,
+            kind=str(body.get("kind") or "").strip() or None,
+            has_image=bool(image_value),
+        )
+        wf = resolved.workflow
+        kind = resolved.kind
         negative_prompt = str(body.get("negative_prompt") or "").strip()
         standard_params = _collect_standard_params({key: body.get(key) for key in STANDARD_PARAMETER_ORDER if key in body})
         seconds_value = _clean_optional_value(body.get("seconds"))
@@ -981,7 +775,7 @@ def create_app() -> FastAPI:
             standard_params=standard_params,
         )
 
-        public_model = requested_model or Path(wf.name).stem
+        public_model = requested_model
         if x_comfyui_async and str(x_comfyui_async).strip() not in {"0", "false", "False"}:
             payload: dict[str, Any] = {
                 "type": "generation_job",
@@ -1023,19 +817,6 @@ def create_app() -> FastAPI:
 
         return _chat_completion_response(model=public_model, content_payload=payload)
 
-    async def _pick_default_workflow(kind: str) -> str:
-        if kind == "txt2img":
-            return cfg.default_txt2img_workflow
-        if kind == "img2img":
-            return cfg.default_img2img_workflow
-        if kind == "txt2video":
-            if not cfg.default_txt2video_workflow:
-                raise _openai_error("DEFAULT_TXT2VIDEO_WORKFLOW is not set", http_status=400)
-            return cfg.default_txt2video_workflow
-        if kind == "img2video":
-            return cfg.default_img2video_workflow
-        raise _openai_error(f"Unsupported kind: {kind}", http_status=400)
-
     @app.post("/v1/jobs")
     async def submit_job(
         request: Request,
@@ -1044,10 +825,17 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         _require_auth(cfg, authorization)
 
-        kind = str(body.get("kind") or "").strip()
-        requested_workflow = str(body.get("workflow") or "").strip()
-        wf = await _resolve_workflow_for_kind(kind=kind, requested_name=requested_workflow)
+        requested_model = str(body.get("model") or "").strip()
+        if not requested_model:
+            raise _openai_error("Missing 'model'", error_code="model_not_found", http_status=404)
+        if str(body.get("workflow") or "").strip():
+            raise _openai_error("Use 'model' (external model id); 'workflow' is not a routing key", http_status=400)
+        kind = str(body.get("kind") or "").strip() or None
+        has_image = bool(body.get("image") or body.get("image_base64"))
+        resolved = await _resolve_public_model(model=requested_model, kind=kind, has_image=has_image)
+        wf = resolved.workflow
         workflow = wf.name
+        kind = resolved.kind
         prompt = str(body.get("prompt") or "").strip()
         negative_prompt = str(body.get("negative_prompt") or "").strip()
 
@@ -1108,6 +896,7 @@ def create_app() -> FastAPI:
             kind=kind,
             workflow=workflow,
             platform="Native",
+            requested_model=requested_model,
             prompt=prompt,
             negative_prompt=negative_prompt,
             image=image_rel,
@@ -1179,18 +968,9 @@ def create_app() -> FastAPI:
         if job.status != "completed":
             error_message = job.error or "Job failed"
             extra = {"job_id": job_id}
-            status_code = _extract_status_code(error_message)
             if "ComfyApiError: ComfyUI " in error_message:
                 extra["upstream"] = "comfyui"
-                extra["comfyui_base_url"] = cfg.comfy_base_url
-                if status_code is not None and status_code >= 500:
-                    error_message = (
-                        f"ComfyUI upstream unavailable. COMFYUI_BASE_URL={cfg.comfy_base_url}. {error_message}"
-                    )
-                else:
-                    error_message = (
-                        f"ComfyUI upstream request failed. COMFYUI_BASE_URL={cfg.comfy_base_url}. {error_message}"
-                    )
+                extra["instance_slug"] = job.instance_slug or None
             raise _openai_error(
                 error_message,
                 code="server_error",
@@ -1210,10 +990,12 @@ def create_app() -> FastAPI:
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise _openai_error("Missing 'prompt'")
-        wf = await _resolve_workflow_for_kind(
+        resolved = await _resolve_public_model(
+            model=str(body.get("model") or "").strip(),
             kind="txt2img",
-            requested_name=str(body.get("workflow") or body.get("model") or "").strip(),
+            has_image=False,
         )
+        wf = resolved.workflow
         workflow = wf.name
         negative_prompt = str(body.get("negative_prompt") or "").strip()
         response_format = _normalize_image_response_format(body.get("response_format"))
@@ -1223,6 +1005,7 @@ def create_app() -> FastAPI:
             kind="txt2img",
             workflow=workflow,
             platform="OpenAI",
+            requested_model=resolved.record.slug,
             prompt=prompt,
             negative_prompt=negative_prompt,
             standard_params=standard_params,
@@ -1266,7 +1049,8 @@ def create_app() -> FastAPI:
         x_comfyui_async: Optional[str] = Header(default=None),
     ) -> Any:
         _require_auth(cfg, authorization)
-        wf = await _resolve_workflow_for_kind(kind="img2img", requested_name=(workflow or model or "").strip())
+        resolved = await _resolve_public_model(model=(model or "").strip(), kind="img2img", has_image=True)
+        wf = resolved.workflow
         raw = await image.read()
         image_rel = await _store_input_image_bytes(data=raw, filename_hint=image.filename)
 
@@ -1284,6 +1068,7 @@ def create_app() -> FastAPI:
             kind="img2img",
             workflow=wf.name,
             platform="OpenAI",
+            requested_model=resolved.record.slug,
             prompt=(prompt or "").strip(),
             negative_prompt=(negative_prompt or "").strip(),
             image=image_rel,
@@ -1326,7 +1111,8 @@ def create_app() -> FastAPI:
         x_comfyui_async: Optional[str] = Header(default=None),
     ) -> Any:
         _require_auth(cfg, authorization)
-        wf = await _resolve_workflow_for_kind(kind="img2img", requested_name=(workflow or model or "").strip())
+        resolved = await _resolve_public_model(model=(model or "").strip(), kind="img2img", has_image=True)
+        wf = resolved.workflow
         raw = await image.read()
         image_rel = await _store_input_image_bytes(data=raw, filename_hint=image.filename)
 
@@ -1344,6 +1130,7 @@ def create_app() -> FastAPI:
             kind="img2img",
             workflow=wf.name,
             platform="OpenAI",
+            requested_model=resolved.record.slug,
             prompt="",
             image=image_rel,
             standard_params=standard_params,
@@ -1379,10 +1166,12 @@ def create_app() -> FastAPI:
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise _openai_error("Missing 'prompt'")
-        wf = await _resolve_workflow_for_kind(
+        resolved = await _resolve_public_model(
+            model=str(body.get("model") or "").strip(),
             kind="txt2video",
-            requested_name=str(body.get("workflow") or body.get("model") or "").strip(),
+            has_image=False,
         )
+        wf = resolved.workflow
         workflow = wf.name
 
         negative_prompt = str(body.get("negative_prompt") or "").strip()
@@ -1394,6 +1183,7 @@ def create_app() -> FastAPI:
             kind="txt2video",
             workflow=workflow,
             platform="OpenAI",
+            requested_model=resolved.record.slug,
             prompt=prompt,
             negative_prompt=negative_prompt,
             standard_params=standard_params,
@@ -1432,7 +1222,8 @@ def create_app() -> FastAPI:
         x_comfyui_async: Optional[str] = Header(default=None),
     ) -> Any:
         _require_auth(cfg, authorization)
-        wf = await _resolve_workflow_for_kind(kind="img2video", requested_name=(workflow or model or "").strip())
+        resolved = await _resolve_public_model(model=(model or "").strip(), kind="img2video", has_image=True)
+        wf = resolved.workflow
         raw = await image.read()
         image_rel = await _store_input_image_bytes(data=raw, filename_hint=image.filename)
 
@@ -1453,6 +1244,7 @@ def create_app() -> FastAPI:
             kind="img2video",
             workflow=wf.name,
             platform="OpenAI",
+            requested_model=resolved.record.slug,
             prompt=(prompt or "").strip(),
             negative_prompt=(negative_prompt or "").strip(),
             image=image_rel,
@@ -1495,10 +1287,9 @@ def create_app() -> FastAPI:
         pct = int((value / total) * 100.0)
         return max(0, min(99, pct))
 
-    async def _workflow_from_model_or_default(*, kind: str, model: str) -> tuple[str, str]:
-        requested = (model or "").strip()
-        wf = await _resolve_workflow_for_kind(kind=kind, requested_name=requested)
-        return wf.name, requested or wf.name
+    async def _workflow_from_model_or_default(*, kind: str, model: str, has_image: bool):
+        resolved = await _resolve_public_model(model=model, kind=kind, has_image=has_image)
+        return resolved
 
     async def _parse_videos_create_payload(request: Request) -> Dict[str, Any]:
         content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
@@ -1589,8 +1380,14 @@ def create_app() -> FastAPI:
             image_rel = await _store_input_image_value(input_reference_value, filename_hint="input_reference")
             kind = "img2video"
 
-        workflow, requested_model = await _workflow_from_model_or_default(kind=kind, model=str(payload.get("model") or ""))
-        wf = await _resolve_workflow_name(workflow)
+        resolved = await _workflow_from_model_or_default(
+            kind=kind,
+            model=str(payload.get("model") or ""),
+            has_image=bool(image_rel),
+        )
+        wf = resolved.workflow
+        workflow = wf.name
+        requested_model = resolved.record.slug
         standard_params = _collect_standard_params(
             {
                 "duration": payload.get("seconds"),
@@ -1762,8 +1559,10 @@ def create_app() -> FastAPI:
             kind = "img2video"
             image_rel = await _store_input_image_value(image_val, filename_hint="image")
 
-        workflow, requested_model = await _workflow_from_model_or_default(kind=kind, model=model)
-        wf = await _resolve_workflow_name(workflow)
+        resolved = await _workflow_from_model_or_default(kind=kind, model=model, has_image=bool(image_rel))
+        wf = resolved.workflow
+        workflow = wf.name
+        requested_model = resolved.record.slug
         standard_params = _collect_standard_params(
             {
                 "duration": body.get("duration"),

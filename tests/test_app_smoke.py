@@ -153,19 +153,12 @@ class AppSmokeTests(unittest.TestCase):
 
         env = {
             "API_TOKEN": "secret-token",
-            "COMFYUI_BASE_URL": "http://127.0.0.1:8188",
-            "COMFYUI_INPUT_DIR": str(root / "input"),
-            "COMFYUI_STARTUP_CHECK": "0",
+            "ADMIN_TOKEN": "admin-token",
             "DATA_DIR": str(root / "data"),
             "DATABASE_PATH": str(root / "data" / "comfyui2api.db"),
-            "DEFAULT_TXT2IMG_WORKFLOW": workflow_name,
-            "DEFAULT_IMG2IMG_WORKFLOW": workflow_name,
-            "DEFAULT_IMG2VIDEO_WORKFLOW": workflow_name,
             "ENABLE_WORKFLOW_WATCH": "0",
-            "IMAGE_UPLOAD_MODE": "local",
             "MAX_BODY_BYTES": "1024",
             "RUNS_DIR": str(runs_dir),
-            "WORKER_CONCURRENCY": "1",
             "WORKFLOWS_DIR": str(workflows_dir),
         }
         cls.env_patcher = patch.dict(os.environ, env, clear=False)
@@ -188,9 +181,45 @@ class AppSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client_cm = TestClient(self.app)
         self.client = self.client_cm.__enter__()
+        self._seed_backend_via_admin()
 
     def tearDown(self) -> None:
         self.client_cm.__exit__(None, None, None)
+
+    def _seed_backend_via_admin(self) -> None:
+        listed = self.client.get("/v1/admin/models", headers={"Authorization": "Bearer admin-token"})
+        if listed.status_code == 200 and listed.json().get("items"):
+            self._mark_pool_healthy()
+            return
+        created = self.client.post(
+            "/v1/admin/instances",
+            headers={"Authorization": "Bearer admin-token"},
+            json={"slug": "gpu-a", "base_url": "http://127.0.0.1:8188"},
+        )
+        self.assertIn(created.status_code, {200, 409})
+        for slug, workflow_name in (
+            ("test_txt2img", self.workflow_name),
+            ("test_txt2video", self.txt2video_workflow_name),
+            ("test_hybrid_video", self.hybrid_video_workflow_name),
+            ("test_dual_input_video", self.dual_input_video_workflow_name),
+        ):
+            self.client.post(
+                "/v1/admin/models",
+                headers={"Authorization": "Bearer admin-token"},
+                json={
+                    "slug": slug,
+                    "workflow_name": workflow_name,
+                    "enabled": True,
+                    "instance_slugs": ["gpu-a"],
+                },
+            )
+        self._mark_pool_healthy()
+
+    def _mark_pool_healthy(self) -> None:
+        for runtime in self.app.state.pool._runtimes.values():
+            runtime.health = "healthy"
+            runtime.consecutive_successes = 1
+            runtime.consecutive_failures = 0
 
     def test_models_require_auth_and_list_loaded_workflow(self) -> None:
         unauthorized = self.client.get("/v1/models")
@@ -203,7 +232,8 @@ class AppSmokeTests(unittest.TestCase):
         by_id = {item["id"]: item for item in payload["data"]}
         self.assertIn("test_txt2img", by_id)
         self.assertNotIn(self.workflow_name, by_id)
-        self.assertEqual(by_id["test_txt2img"]["metadata"]["kind"], "txt2img")
+        self.assertEqual(by_id["test_txt2img"]["kind"], ["txt2img"])
+        self.assertTrue(by_id["test_txt2img"]["ready"])
 
     def test_request_body_limit_returns_413(self) -> None:
         response = self.client.post("/v1/images/generations", json={"prompt": "x" * 2048})
@@ -226,6 +256,7 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "pending")
         kwargs = mock_create_job.await_args.kwargs
         self.assertEqual(kwargs["workflow"], self.workflow_name)
+        self.assertEqual(kwargs["requested_model"], "test_txt2img")
 
     def test_chat_completions_routes_text_prompt_to_txt2img(self) -> None:
         mock_create_job = AsyncMock(
@@ -298,8 +329,8 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_workflow_parameters_endpoint_exposes_sidecar_mapping(self) -> None:
         response = self.client.get(
-            f"/v1/workflows/{self.workflow_name}/parameters",
-            headers={"Authorization": "Bearer secret-token"},
+            f"/v1/admin/workflows/{self.workflow_name}/parameters",
+            headers={"Authorization": "Bearer admin-token"},
         )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -320,8 +351,8 @@ class AppSmokeTests(unittest.TestCase):
 
     def test_workflow_parameters_template_endpoint_returns_copyable_template(self) -> None:
         response = self.client.get(
-            f"/v1/workflows/{self.workflow_name}/parameters/template",
-            headers={"Authorization": "Bearer secret-token"},
+            f"/v1/admin/workflows/{self.workflow_name}/parameters/template",
+            headers={"Authorization": "Bearer admin-token"},
         )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -341,7 +372,7 @@ class AppSmokeTests(unittest.TestCase):
                     "Authorization": "Bearer secret-token",
                     "x-comfyui-async": "1",
                 },
-                json={"prompt": "cat", "size": "1024x768", "seed": 7, "steps": 12},
+                json={"prompt": "cat", "model": "test_txt2img", "size": "1024x768", "seed": 7, "steps": 12},
             )
         self.assertEqual(response.status_code, 200)
         kwargs = mock_create_job.await_args.kwargs
@@ -386,7 +417,7 @@ class AppSmokeTests(unittest.TestCase):
             response = self.client.post(
                 "/v1/images/generations",
                 headers={"Authorization": "Bearer secret-token"},
-                json={"prompt": "cat", "response_format": "base64"},
+                json={"prompt": "cat", "model": "test_txt2img", "response_format": "base64"},
             )
 
         self.assertEqual(response.status_code, 200)
@@ -399,7 +430,7 @@ class AppSmokeTests(unittest.TestCase):
             response = self.client.post(
                 "/v1/images/edits",
                 headers={"Authorization": "Bearer secret-token"},
-                data={"prompt": "cat", "workflow": self.workflow_name},
+                data={"prompt": "cat", "model": "test_txt2img"},
                 files={"image": ("input.png", b"fake-image", "image/png")},
             )
 
@@ -420,7 +451,7 @@ class AppSmokeTests(unittest.TestCase):
                 headers={"Authorization": "Bearer secret-token"},
                 data={
                     "prompt": "cat animation",
-                    "model": self.txt2video_workflow_name,
+                    "model": "test_txt2video",
                     "seconds": "5",
                     "size": "1280x720",
                     "fps": "24",
@@ -473,7 +504,7 @@ class AppSmokeTests(unittest.TestCase):
                 headers={"Authorization": "Bearer secret-token"},
                 data={
                     "prompt": "cat animation",
-                    "model": self.hybrid_video_workflow_name,
+                    "model": "test_hybrid_video",
                     "seconds": "5",
                 },
                 files={},
@@ -500,7 +531,7 @@ class AppSmokeTests(unittest.TestCase):
                 json={
                     "prompt": "primary prompt",
                     "prompt2": "secondary prompt",
-                    "model": self.dual_input_video_workflow_name,
+                    "model": "test_dual_input_video",
                     "image": first_image,
                     "image2": second_image,
                     "duration": 5,
@@ -654,7 +685,7 @@ class AppSmokeTests(unittest.TestCase):
             response = self.client.post(
                 "/v1/images/generations",
                 headers={"Authorization": "Bearer secret-token"},
-                json={"prompt": "cat"},
+                json={"prompt": "cat", "model": "test_txt2img"},
             )
 
         self.assertEqual(response.status_code, 500)
@@ -663,7 +694,7 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["job_id"], "job-failed")
         self.assertIn("RuntimeError: prompt resolution failed", payload["error"]["message"])
 
-    def test_images_generations_upstream_failure_mentions_comfyui_base_url(self) -> None:
+    def test_images_generations_upstream_failure_includes_instance_slug(self) -> None:
         from comfyui2api.jobs import Job
 
         done = asyncio.Event()
@@ -675,6 +706,7 @@ class AppSmokeTests(unittest.TestCase):
             status="failed",
             kind="txt2img",
             workflow=self.workflow_name,
+            instance_slug="gpu-a",
             error=(
                 "ComfyApiError: ComfyUI /prompt failed: status=502, "
                 "url=http://127.0.0.1:8188/prompt, headers={'server': 'nginx'}, body=''"
@@ -690,7 +722,7 @@ class AppSmokeTests(unittest.TestCase):
             response = self.client.post(
                 "/v1/images/generations",
                 headers={"Authorization": "Bearer secret-token"},
-                json={"prompt": "cat"},
+                json={"prompt": "cat", "model": "test_txt2img"},
             )
 
         self.assertEqual(response.status_code, 500)
@@ -698,21 +730,12 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "server_error")
         self.assertEqual(payload["error"]["job_id"], "job-upstream")
         self.assertEqual(payload["error"]["upstream"], "comfyui")
-        self.assertEqual(payload["error"]["comfyui_base_url"], "http://127.0.0.1:8188")
-        self.assertIn("ComfyUI upstream unavailable", payload["error"]["message"])
-        self.assertIn("status=502", payload["error"]["message"])
+        self.assertEqual(payload["error"]["instance_slug"], "gpu-a")
+        self.assertIn("ComfyApiError: ComfyUI /prompt failed", payload["error"]["message"])
 
-    def test_startup_fails_fast_when_comfyui_healthcheck_fails(self) -> None:
-        env = {"COMFYUI_STARTUP_CHECK": "1"}
-        with patch.dict(os.environ, env, clear=False):
-            with patch.object(self.app_module.ComfyUIClient, "system_stats", AsyncMock(side_effect=RuntimeError("bad gateway"))):
-                app = self.app_module.create_app()
-                with self.assertRaises(RuntimeError) as ctx:
-                    with TestClient(app):
-                        pass
-
-        self.assertIn("ComfyUI startup check failed", str(ctx.exception))
-        self.assertIn("COMFYUI_BASE_URL=http://127.0.0.1:8188", str(ctx.exception))
+    def test_public_workflows_are_removed(self) -> None:
+        response = self.client.get("/v1/workflows", headers={"Authorization": "Bearer secret-token"})
+        self.assertEqual(response.status_code, 404)
 
 
 class JobManagerErrorHandlingTests(unittest.IsolatedAsyncioTestCase):
@@ -720,13 +743,18 @@ class JobManagerErrorHandlingTests(unittest.IsolatedAsyncioTestCase):
         import comfyui2api.jobs as jobs_module
         from comfyui2api.workflow_params import WorkflowParameterSpec
 
+        from tests.helpers import fake_job_deps
+
+        client = SimpleNamespace(
+            object_info=AsyncMock(return_value={}),
+            queue_prompt=AsyncMock(side_effect=RuntimeError("stop")),
+        )
+        deps = fake_job_deps(client=client, runs_dir=Path("."))
         manager = jobs_module.JobManager(
-            cfg=SimpleNamespace(worker_concurrency=1, runs_dir=Path(".")),
+            cfg=deps.cfg,
             registry=SimpleNamespace(),
-            comfy=SimpleNamespace(
-                object_info=AsyncMock(return_value={}),
-                queue_prompt=AsyncMock(side_effect=RuntimeError("stop")),
-            ),
+            pool=deps.pool,
+            backend=deps.backend,
         )
 
         spec = WorkflowParameterSpec(
@@ -754,7 +782,7 @@ class JobManagerErrorHandlingTests(unittest.IsolatedAsyncioTestCase):
             jobs_module, "prepare_prompt", return_value=({}, None, [], {})
         ) as mock_prepare:
             with self.assertRaises(RuntimeError) as ctx:
-                await manager._run_job(job.job_id)
+                await manager._run_job(job.job_id, client=client)
 
         self.assertEqual(str(ctx.exception), "stop")
         kwargs = mock_prepare.call_args.kwargs
@@ -762,48 +790,30 @@ class JobManagerErrorHandlingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["image_node"], "167.image")
         self.assertIsNone(kwargs["negative_prompt_node"])
 
-    async def test_worker_logs_traceback_and_records_exception_type(self) -> None:
+    async def test_fail_job_records_error_and_sets_done(self) -> None:
         import comfyui2api.jobs as jobs_module
+        from tests.helpers import fake_job_deps
 
+        deps = fake_job_deps()
         manager = jobs_module.JobManager(
-            cfg=SimpleNamespace(worker_concurrency=1),
+            cfg=deps.cfg,
             registry=SimpleNamespace(),
-            comfy=SimpleNamespace(),
+            pool=deps.pool,
+            backend=deps.backend,
         )
-
-        with patch.object(manager, "_run_job", AsyncMock(side_effect=RuntimeError("boom"))), patch.object(
-            jobs_module.logger, "exception"
-        ) as mock_exception:
-            job = await manager.create_job(
-                kind="txt2img",
-                workflow="broken.json",
-                requested_model="broken-model",
-                prompt="cat",
-            )
-            worker = asyncio.create_task(manager._worker_loop(7))
-            try:
-                await asyncio.wait_for(job.done.wait(), timeout=1)
-            finally:
-                worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
-
+        job = await manager.create_job(
+            kind="txt2img",
+            workflow="broken.json",
+            requested_model="broken-model",
+            prompt="cat",
+        )
+        await manager.fail_job(job.job_id, "RuntimeError: boom")
         updated = await manager.get_job(job.job_id)
         self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated.status, "failed")
         self.assertEqual(updated.error, "RuntimeError: boom")
-        mock_exception.assert_called_once()
-        self.assertEqual(
-            mock_exception.call_args.args,
-            (
-                "job failed: job_id=%s worker=%s workflow=%s kind=%s requested_model=%s",
-                job.job_id,
-                7,
-                "broken.json",
-                "txt2img",
-                "broken-model",
-            ),
-        )
+        self.assertTrue(updated.done.is_set())
 
 
 if __name__ == "__main__":

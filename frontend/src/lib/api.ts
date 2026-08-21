@@ -22,6 +22,8 @@ export interface TaskRecord {
   kind: string;
   workflow: string;
   requested_model?: string | null;
+  model_slug?: string | null;
+  instance_slug?: string | null;
   status: TaskStatus;
   progress_percent: number;
   progress?: Record<string, unknown> | null;
@@ -49,12 +51,42 @@ export interface TaskDetailResponse {
 
 export interface AdminStats {
   counts: Record<TaskStatus, number>;
-  worker_concurrency: number;
-  comfyui_base_url: string;
+  instance_count: number;
+  healthy_instance_count: number;
   workflows_dir: string;
   runs_dir: string;
   database_path: string;
   ui_enabled: boolean;
+}
+
+export type InstanceHealth = "unknown" | "healthy" | "unhealthy" | "disabled";
+
+export interface InstanceRecord {
+  slug: string;
+  display_name?: string | null;
+  base_url: string;
+  enabled: boolean;
+  max_in_flight: number;
+  health_interval_s?: number | null;
+  has_auth_token: boolean;
+  health: InstanceHealth;
+  consecutive_failures: number;
+  last_check_at?: number | null;
+  last_error?: string | null;
+  in_flight: number;
+  bound_model_count: number;
+}
+
+export interface ExternalModelRecord {
+  slug: string;
+  display_name?: string | null;
+  workflow_name?: string | null;
+  routing_policy: "round_robin" | "random";
+  enabled: boolean;
+  instance_slugs: string[];
+  kind: string[];
+  workflow_available: boolean;
+  ready: boolean;
 }
 
 export interface TaskFilters {
@@ -125,6 +157,54 @@ export async function getStats(): Promise<AdminStats> {
 
 export async function listWorkflows(): Promise<WorkflowListResponse> {
   return requestJson<WorkflowListResponse>("/v1/admin/workflows");
+}
+
+export async function listInstances(): Promise<{ items: InstanceRecord[] }> {
+  return requestJson<{ items: InstanceRecord[] }>("/v1/admin/instances");
+}
+
+export async function createInstance(body: Record<string, unknown>): Promise<InstanceRecord> {
+  return requestJson<InstanceRecord>("/v1/admin/instances", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function patchInstance(slug: string, body: Record<string, unknown>): Promise<InstanceRecord> {
+  return requestJson<InstanceRecord>(`/v1/admin/instances/${encodeURIComponent(slug)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function deleteInstance(slug: string): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(`/v1/admin/instances/${encodeURIComponent(slug)}`, { method: "DELETE" });
+}
+
+export async function listModels(): Promise<{ items: ExternalModelRecord[] }> {
+  return requestJson<{ items: ExternalModelRecord[] }>("/v1/admin/models");
+}
+
+export async function createModel(body: Record<string, unknown>): Promise<ExternalModelRecord> {
+  return requestJson<ExternalModelRecord>("/v1/admin/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function patchModel(slug: string, body: Record<string, unknown>): Promise<ExternalModelRecord> {
+  return requestJson<ExternalModelRecord>(`/v1/admin/models/${encodeURIComponent(slug)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+export async function deleteModel(slug: string): Promise<{ status: string }> {
+  return requestJson<{ status: string }>(`/v1/admin/models/${encodeURIComponent(slug)}`, { method: "DELETE" });
 }
 
 export async function shutdownApp(): Promise<{ status: string }> {

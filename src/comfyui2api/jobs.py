@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .backend_store import BackendStore
 from .comfy_client import ComfyApiError, ComfyUIClient
 from .comfy_workflow import (
     iter_file_outputs,
@@ -16,6 +17,8 @@ from .comfy_workflow import (
     prune_invalid_orphan_output_nodes,
 )
 from .config import Config
+from .instance_pool import InstancePool
+from .job_scheduler import JobScheduler
 from .util import guess_media_type, json_dumps, pick_primary_url, sanitize_filename_part, utc_now_iso, utc_now_unix
 from .workflow_params import resolve_standard_overrides
 from .workflow_registry import WorkflowDefinition, WorkflowRegistry
@@ -43,6 +46,8 @@ class Job:
     workflow: str
     platform: str = "Native"
     requested_model: str = ""
+    model_slug: str = ""
+    instance_slug: str = ""
     seconds: str = ""
     size: str = ""
     quality: str = ""
@@ -86,18 +91,19 @@ class JobManager:
         *,
         cfg: Config,
         registry: WorkflowRegistry,
-        comfy: ComfyUIClient,
+        pool: InstancePool,
+        backend: BackendStore,
         store: Any | None = None,
     ) -> None:
         self.cfg = cfg
         self.registry = registry
-        self.comfy = comfy
+        self.pool = pool
+        self.backend = backend
         self.store = store
 
         self._lock = asyncio.Lock()
         self._jobs: Dict[str, Job] = {}
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._workers: list[asyncio.Task[None]] = []
+        self.scheduler = JobScheduler(self)
 
         self._subscribers: Dict[str, set[Any]] = {}  # job_id -> set[WebSocket]
         self._sub_lock = asyncio.Lock()
@@ -105,14 +111,10 @@ class JobManager:
         self._global_sub_lock = asyncio.Lock()
 
     async def start_workers(self) -> None:
-        for i in range(self.cfg.worker_concurrency):
-            self._workers.append(asyncio.create_task(self._worker_loop(i), name=f"job-worker-{i}"))
+        await self.scheduler.start()
 
     async def stop_workers(self) -> None:
-        for t in self._workers:
-            t.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
-        self._workers.clear()
+        await self.scheduler.stop()
 
     async def create_job(
         self,
@@ -145,6 +147,8 @@ class JobManager:
             workflow=workflow,
             platform=platform or "Native",
             requested_model=requested_model or "",
+            model_slug=requested_model or "",
+            instance_slug="",
             seconds=seconds or "",
             size=size or "",
             quality=quality or "",
@@ -175,7 +179,7 @@ class JobManager:
         async with self._lock:
             self._jobs[job_id] = job
         await self._persist_job(job)
-        await self._queue.put(job_id)
+        self.scheduler.enqueue(job_id)
         await self._publish(job_id, {"type": "job_created", "data": self.public_job(job)})
         return job
 
@@ -200,7 +204,9 @@ class JobManager:
             "kind": job.kind,
             "workflow": job.workflow,
             "platform": job.platform,
-            "requested_model": job.requested_model or None,
+            "requested_model": job.requested_model or job.model_slug or None,
+            "model_slug": job.model_slug or job.requested_model or None,
+            "instance_slug": job.instance_slug or None,
             "seconds": job.seconds or None,
             "size": job.size or None,
             "quality": job.quality or None,
@@ -334,28 +340,12 @@ class JobManager:
             except Exception:
                 await self.unsubscribe_all(ws)
 
-    async def _worker_loop(self, worker_index: int) -> None:
-        while True:
-            job_id = await self._queue.get()
-            try:
-                await self._run_job(job_id)
-            except Exception as e:
-                job = await self.get_job(job_id)
-                error_message = f"{type(e).__name__}: {e}"
-                logger.exception(
-                    "job failed: job_id=%s worker=%s workflow=%s kind=%s requested_model=%s",
-                    job_id,
-                    worker_index,
-                    job.workflow if job else "",
-                    job.kind if job else "",
-                    job.requested_model if job else "",
-                )
-                await self._update(job_id, status="failed", error=error_message)
-                await self._publish(job_id, {"type": "job_failed", "data": {"error": error_message}})
-                if job:
-                    job.done.set()
-            finally:
-                self._queue.task_done()
+    async def fail_job(self, job_id: str, error_message: str) -> None:
+        job = await self.get_job(job_id)
+        await self._update(job_id, status="failed", error=error_message)
+        await self._publish(job_id, {"type": "job_failed", "data": {"error": error_message}})
+        if job:
+            job.done.set()
 
     async def _resolve_workflow(self, name: str) -> WorkflowDefinition:
         wf = await self.registry.get(name)
@@ -366,7 +356,7 @@ class JobManager:
                 return item
         raise FileNotFoundError(f"Workflow not found: {name}")
 
-    async def _run_job(self, job_id: str) -> None:
+    async def _run_job(self, job_id: str, *, client: ComfyUIClient) -> None:
         job = await self.get_job(job_id)
         if not job:
             return
@@ -412,7 +402,7 @@ class JobManager:
             )
             + list(job.overrides or []),
         )
-        object_info = await self.comfy.object_info()
+        object_info = await client.object_info()
         removed_nodes = prune_invalid_orphan_output_nodes(prompt_graph, object_info=object_info)
         normalized_inputs = normalize_prompt_enum_inputs(prompt_graph, object_info=object_info)
         if removed_nodes or normalized_inputs:
@@ -439,7 +429,7 @@ class JobManager:
             ),
         )
 
-        qp = await self.comfy.queue_prompt(prompt=prompt_graph, client_id=client_id, extra_data=extra_data)
+        qp = await client.queue_prompt(prompt=prompt_graph, client_id=client_id, extra_data=extra_data)
         await self._update(job_id, prompt_id=qp.prompt_id, queue_number=qp.number)
         await self._publish(
             job_id,
@@ -457,10 +447,11 @@ class JobManager:
         await self._update(job_id, run_dir=str(run_dir))
 
         ws_task = asyncio.create_task(
-            self._monitor_ws(job_id=job_id, client_id=client_id, prompt_id=qp.prompt_id), name=f"job-ws-{job_id[:8]}"
+            self._monitor_ws(job_id=job_id, client=client, client_id=client_id, prompt_id=qp.prompt_id),
+            name=f"job-ws-{job_id[:8]}",
         )
         hist_task = asyncio.create_task(
-            self.comfy.wait_for_history_complete(
+            client.wait_for_history_complete(
                 prompt_id=qp.prompt_id, timeout_s=self.cfg.timeout_s, poll_interval_s=self.cfg.poll_interval_s
             ),
             name=f"job-hist-{job_id[:8]}",
@@ -505,7 +496,7 @@ class JobManager:
             if not isinstance(folder_type, str):
                 folder_type = "output"
 
-            blob = await self.comfy.view_bytes(filename=filename, subfolder=subfolder, folder_type=folder_type)
+            blob = await client.view_bytes(filename=filename, subfolder=subfolder, folder_type=folder_type)
             safe_node = sanitize_filename_part(node_id, max_len=60)
             safe_name = sanitize_filename_part(Path(filename).name, max_len=120)
             out_name = f"{safe_node}__{safe_name}"
@@ -537,8 +528,8 @@ class JobManager:
         if job:
             job.done.set()
 
-    async def _monitor_ws(self, *, job_id: str, client_id: str, prompt_id: str) -> None:
-        async for msg in self.comfy.ws_events(client_id=client_id):
+    async def _monitor_ws(self, *, job_id: str, client: ComfyUIClient, client_id: str, prompt_id: str) -> None:
+        async for msg in client.ws_events(client_id=client_id):
             await self._publish(job_id, {"type": "comfyui_ws", "data": msg})
             mtype = msg.get("type")
             data = msg.get("data", {})

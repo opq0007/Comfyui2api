@@ -761,6 +761,47 @@ tbody tr:hover {
   color: var(--muted);
 }
 
+.backend-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
+.backend-form input,
+.backend-form select {
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.backend-form select[multiple] {
+  min-height: 88px;
+  padding: 8px 10px;
+}
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.model-edit-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+.instance-edit-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
 .drawer-layer {
   position: fixed;
   inset: 0;

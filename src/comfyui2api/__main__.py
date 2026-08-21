@@ -91,7 +91,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    return build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
+    # Bare `python -m comfyui2api` (start.bat / start.ps1) has no subcommand, so
+    # argparse never attaches the ui/serve options. Fill them so main() can treat
+    # the empty invocation as UI mode without AttributeError.
+    if not hasattr(args, "host"):
+        args.host = ""
+    if not hasattr(args, "port"):
+        args.port = 0
+    if not hasattr(args, "no_open"):
+        args.no_open = False
+    if not hasattr(args, "disable_ui"):
+        args.disable_ui = False
+    if not hasattr(args, "log_level"):
+        args.log_level = "info"
+    if not hasattr(args, "env_file"):
+        args.env_file = ""
+    return args
 
 
 def open_browser_later(url: str, *, delay_s: float = 1.0) -> None:
@@ -216,7 +232,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.disable_ui:
         os.environ["COMFYUI2API_DISABLE_UI"] = "1"
 
-    from comfyui2api.app import app
+    from comfyui2api.errors import ConfigError
+
+    try:
+        from comfyui2api.app import app
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
 
     if command == "ui" and getattr(sys, "frozen", False) and not _env_bool("COMFYUI2API_NO_WINDOW", False):
         _run_desktop_window(app, host=host, port=port, log_level=args.log_level, should_open=should_open)

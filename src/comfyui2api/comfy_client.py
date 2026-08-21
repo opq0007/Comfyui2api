@@ -70,20 +70,32 @@ class QueuedPrompt:
     number: Optional[int] = None
 
 
+def _auth_headers(auth_token: str | None, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    headers = dict(extra or {})
+    token = (auth_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 class ComfyUIClient:
-    def __init__(self, base_url: str, *, http_timeout_s: int = 30) -> None:
+    def __init__(self, base_url: str, *, http_timeout_s: int = 30, auth_token: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
+        self.auth_token = (auth_token or "").strip() or None
         self._timeout = httpx.Timeout(timeout=http_timeout_s)
         self._client = httpx.AsyncClient(timeout=self._timeout, trust_env=_should_trust_env(self.base_url))
         self._object_info_lock = asyncio.Lock()
         self._object_info_cache: Optional[Dict[str, Any]] = None
+
+    def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        return _auth_headers(self.auth_token, extra)
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
     async def system_stats(self) -> Any:
         url = _join(self.base_url, "/system_stats")
-        r = await self._client.get(url, headers={"Accept": "application/json"})
+        r = await self._client.get(url, headers=self._headers({"Accept": "application/json"}))
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -92,7 +104,7 @@ class ComfyUIClient:
 
     async def get_queue(self) -> Any:
         url = _join(self.base_url, "/queue")
-        r = await self._client.get(url, headers={"Accept": "application/json"})
+        r = await self._client.get(url, headers=self._headers({"Accept": "application/json"}))
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -104,7 +116,7 @@ class ComfyUIClient:
             if self._object_info_cache is not None and not force:
                 return self._object_info_cache
             url = _join(self.base_url, "/object_info")
-            r = await self._client.get(url, headers={"Accept": "application/json"})
+            r = await self._client.get(url, headers=self._headers({"Accept": "application/json"}))
             try:
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:
@@ -129,7 +141,7 @@ class ComfyUIClient:
             payload["prompt_id"] = prompt_id
         if isinstance(extra_data, dict) and extra_data:
             payload["extra_data"] = extra_data
-        r = await self._client.post(url, json=payload, headers={"Accept": "application/json"})
+        r = await self._client.post(url, json=payload, headers=self._headers({"Accept": "application/json"}))
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -148,7 +160,7 @@ class ComfyUIClient:
 
     async def get_history_entry(self, prompt_id: str) -> Optional[Dict[str, Any]]:
         url = _join(self.base_url, f"/history/{prompt_id}")
-        r = await self._client.get(url, headers={"Accept": "application/json"})
+        r = await self._client.get(url, headers=self._headers({"Accept": "application/json"}))
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict) and prompt_id in data and isinstance(data[prompt_id], dict):
@@ -158,7 +170,7 @@ class ComfyUIClient:
     async def view_bytes(self, *, filename: str, subfolder: str = "", folder_type: str = "output") -> bytes:
         qs = urlencode({"filename": filename, "subfolder": subfolder, "type": folder_type})
         url = _join(self.base_url, "/view?" + qs)
-        r = await self._client.get(url, headers={"Accept": "*/*"})
+        r = await self._client.get(url, headers=self._headers({"Accept": "*/*"}))
         r.raise_for_status()
         return r.content
 
@@ -179,7 +191,7 @@ class ComfyUIClient:
             "overwrite": "true" if overwrite else "false",
         }
         files = {"image": (filename or "image.png", data, "application/octet-stream")}
-        r = await self._client.post(url, data=form, files=files, headers={"Accept": "application/json"})
+        r = await self._client.post(url, data=form, files=files, headers=self._headers({"Accept": "application/json"}))
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -213,7 +225,8 @@ class ComfyUIClient:
 
     async def ws_events(self, *, client_id: str) -> AsyncIterator[Dict[str, Any]]:
         url = _ws_url(self.base_url, client_id=client_id)
-        async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+        extra_headers = _auth_headers(self.auth_token)
+        async with websockets.connect(url, ping_interval=20, ping_timeout=20, additional_headers=extra_headers or None) as ws:
             async for raw in ws:
                 if isinstance(raw, (bytes, bytearray)):
                     continue

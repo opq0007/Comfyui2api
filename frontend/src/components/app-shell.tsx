@@ -1,9 +1,9 @@
 import type React from "react";
-import { Activity, Files, LayoutDashboard, Power, RefreshCw, Settings, Workflow, Zap } from "lucide-react";
+import { Activity, Files, LayoutDashboard, Power, RefreshCw, Server, Settings, Workflow } from "lucide-react";
 import type { AdminStats, TaskStatus } from "../lib/api";
 import { ThemeToggle, type ThemeMode } from "./theme-toggle";
 
-export type DashboardView = "overview" | "tasks" | "workflows" | "outputs" | "comfyui" | "workers";
+export type DashboardView = "overview" | "tasks" | "workflows" | "outputs" | "instances" | "models";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -55,8 +55,8 @@ export function AppShell({
     { view: "outputs", icon: <Files size={16} />, label: "输出文件" }
   ];
   const runtimeItems: Array<{ view: DashboardView; icon: React.ReactNode; label: string }> = [
-    { view: "comfyui", icon: <Zap size={16} />, label: "ComfyUI" },
-    { view: "workers", icon: <RefreshCw size={16} />, label: "Workers" }
+    { view: "instances", icon: <Server size={16} />, label: "实例" },
+    { view: "models", icon: <Workflow size={16} />, label: "对外模型" }
   ];
 
   return (
@@ -102,7 +102,9 @@ export function AppShell({
         <div className="connection-card">
           <div className={live ? "pulse-dot online" : "pulse-dot"} />
           <strong>{live ? "实时同步" : "轮询同步"}</strong>
-          <span>{stats?.comfyui_base_url ?? "ComfyUI"}</span>
+          <span>
+            {stats ? `${stats.healthy_instance_count}/${stats.instance_count} 健康实例` : "实例池"}
+          </span>
         </div>
       </aside>
       <main className="main-shell">

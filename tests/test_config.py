@@ -21,6 +21,8 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "API_TOKEN": "api-token",
+                "ADMIN_TOKEN": "admin-token",
                 "JOB_RETENTION_DAYS": "3",
                 "JOB_RETENTION_SECONDS": "60",
             },
@@ -34,6 +36,8 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "API_TOKEN": "api-token",
+                "ADMIN_TOKEN": "admin-token",
                 "JOB_RETENTION_DAYS": "0",
                 "JOB_RETENTION_SECONDS": "604800",
             },
@@ -47,6 +51,8 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "API_TOKEN": "api-token",
+                "ADMIN_TOKEN": "admin-token",
                 "JOB_RETENTION_DAYS": "",
                 "JOB_RETENTION_SECONDS": "120",
             },
@@ -55,6 +61,16 @@ class ConfigTests(unittest.TestCase):
             cfg = load_config()
 
         self.assertEqual(cfg.job_retention_seconds, 120)
+
+    def test_missing_tokens_raise_config_error(self) -> None:
+        from comfyui2api.errors import ConfigError
+
+        with patch.dict(os.environ, {"API_TOKEN": "", "ADMIN_TOKEN": "admin"}, clear=False):
+            with self.assertRaises(ConfigError):
+                load_config()
+        with patch.dict(os.environ, {"API_TOKEN": "api", "ADMIN_TOKEN": ""}, clear=False):
+            with self.assertRaises(ConfigError):
+                load_config()
 
 
 if __name__ == "__main__":

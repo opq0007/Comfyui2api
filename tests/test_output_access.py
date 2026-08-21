@@ -45,14 +45,11 @@ class OutputAccessTests(unittest.TestCase):
 
         env = {
             "API_TOKEN": "secret-token",
-            "COMFYUI_BASE_URL": "http://127.0.0.1:8188",
-            "COMFYUI_STARTUP_CHECK": "0",
-            "DEFAULT_TXT2IMG_WORKFLOW": workflow_name,
-            "DEFAULT_IMG2IMG_WORKFLOW": workflow_name,
-            "DEFAULT_IMG2VIDEO_WORKFLOW": workflow_name,
+            "ADMIN_TOKEN": "admin-token",
+            "DATA_DIR": str(root / "data"),
+            "DATABASE_PATH": str(root / "data" / "comfyui2api.db"),
             "ENABLE_WORKFLOW_WATCH": "0",
             "RUNS_DIR": str(runs_dir),
-            "WORKER_CONCURRENCY": "1",
             "WORKFLOWS_DIR": str(workflows_dir),
         }
         cls.env_patcher = patch.dict(os.environ, env, clear=False)

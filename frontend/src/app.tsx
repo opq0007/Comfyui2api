@@ -4,10 +4,14 @@ import {
   AuthError,
   getStats,
   getTask,
+  listInstances,
+  listModels,
   listWorkflows,
   listTasks,
   shutdownApp,
   type AdminStats,
+  type ExternalModelRecord,
+  type InstanceRecord,
   type TaskDetailResponse,
   type TaskFilters,
   type TaskListResponse,
@@ -19,6 +23,7 @@ import { clearAdminToken, getAdminToken, setAdminToken } from "./lib/auth";
 import { connectAdminSocket } from "./lib/websocket";
 import { AppShell } from "./components/app-shell";
 import type { DashboardView } from "./components/app-shell";
+import { InstancesPanel, ModelsPanel } from "./components/backend-panels";
 import { SettingsPanel } from "./components/settings-panel";
 import { StatusCards } from "./components/status-cards";
 import { TaskFiltersBar } from "./components/task-filters";
@@ -49,7 +54,7 @@ export function App(): React.ReactElement {
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [authNeeded, setAuthNeeded] = useState(false);
+  const [authNeeded, setAuthNeeded] = useState(() => !getAdminToken());
   const [live, setLive] = useState(false);
   const [selectedTask, setSelectedTask] = useState<TaskRecord | null>(null);
   const [detail, setDetail] = useState<TaskDetailResponse | null>(null);
@@ -58,6 +63,9 @@ export function App(): React.ReactElement {
   const [activeView, setActiveView] = useState<DashboardView>("tasks");
   const [workflows, setWorkflows] = useState<WorkflowListResponse | null>(null);
   const [workflowsLoading, setWorkflowsLoading] = useState(false);
+  const [instances, setInstances] = useState<InstanceRecord[]>([]);
+  const [models, setModels] = useState<ExternalModelRecord[]>([]);
+  const [backendLoading, setBackendLoading] = useState(false);
   const [quitting, setQuitting] = useState(false);
 
   useEffect(() => {
@@ -68,6 +76,10 @@ export function App(): React.ReactElement {
   const apiFilters = useMemo(() => toApiFilters(appliedFilters), [appliedFilters]);
 
   const refresh = useCallback(async () => {
+    if (!getAdminToken()) {
+      setAuthNeeded(true);
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -88,8 +100,9 @@ export function App(): React.ReactElement {
   }, [apiFilters]);
 
   useEffect(() => {
+    if (authNeeded) return;
     void refresh();
-  }, [refresh]);
+  }, [authNeeded, refresh]);
 
   useEffect(() => {
     if (authNeeded) return;
@@ -139,6 +152,36 @@ export function App(): React.ReactElement {
     }, 2000);
     return () => window.clearInterval(id);
   }, [authNeeded, live, refresh]);
+
+  const refreshBackend = useCallback(async () => {
+    if (!getAdminToken()) return;
+    setBackendLoading(true);
+    try {
+      const [instanceList, modelList, workflowList] = await Promise.all([listInstances(), listModels(), listWorkflows()]);
+      setInstances(instanceList.items);
+      setModels(modelList.items);
+      setWorkflows(workflowList);
+      setAuthNeeded(false);
+    } catch (err) {
+      if (err instanceof AuthError) {
+        clearAdminToken();
+        setAuthNeeded(true);
+      } else {
+        setError(err instanceof Error ? err.message : "后端配置加载失败");
+      }
+    } finally {
+      setBackendLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (authNeeded || (activeView !== "instances" && activeView !== "models")) return;
+    void refreshBackend();
+    const id = window.setInterval(() => {
+      void refreshBackend();
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [activeView, authNeeded, refreshBackend]);
 
   useEffect(() => {
     if (!selectedTask) {
@@ -239,13 +282,13 @@ export function App(): React.ReactElement {
       {error ? <div className="error-banner">{error}</div> : null}
       {activeView === "overview" ? (
         <>
-          <StatusCards counts={counts} total={total} workerConcurrency={stats?.worker_concurrency} />
+          <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} />
           <OverviewPanel stats={stats} total={total} />
         </>
       ) : null}
       {activeView === "tasks" ? (
         <>
-          <StatusCards counts={counts} total={total} workerConcurrency={stats?.worker_concurrency} />
+          <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} />
           <TaskFiltersBar
             filters={filters}
             onChange={setFilters}
@@ -262,8 +305,18 @@ export function App(): React.ReactElement {
         <WorkflowPanel workflows={workflows} loading={workflowsLoading} onRefresh={() => void refreshWorkflows()} />
       ) : null}
       {activeView === "outputs" ? <OutputsPanel tasks={tasks.items} onOpenTask={setSelectedTask} /> : null}
-      {activeView === "comfyui" ? <RuntimePanel stats={stats} kind="comfyui" /> : null}
-      {activeView === "workers" ? <RuntimePanel stats={stats} kind="workers" /> : null}
+      {activeView === "instances" ? (
+        <InstancesPanel items={instances} loading={backendLoading} onRefresh={() => void refreshBackend()} />
+      ) : null}
+      {activeView === "models" ? (
+        <ModelsPanel
+          items={models}
+          instances={instances}
+          workflows={workflows}
+          loading={backendLoading}
+          onRefresh={() => void refreshBackend()}
+        />
+      ) : null}
       <TaskPreviewDrawer
         task={selectedTask}
         detail={detail}
@@ -287,8 +340,8 @@ const viewTitles: Record<DashboardView, { title: string; subtitle: string }> = {
   tasks: { title: "任务记录", subtitle: "队列、状态、耗时、输出预览与失败原因" },
   workflows: { title: "工作流", subtitle: "已加载工作流、类型和加载状态" },
   outputs: { title: "输出文件", subtitle: "最近任务产物和预览入口" },
-  comfyui: { title: "ComfyUI", subtitle: "上游服务地址和连接状态" },
-  workers: { title: "Workers", subtitle: "后台 worker 并发和任务状态" }
+  instances: { title: "实例", subtitle: "登记 ComfyUI 后端、健康状态和并发槽" },
+  models: { title: "对外模型", subtitle: "工作流绑定、实例池和路由策略" }
 };
 
 function OverviewPanel({ stats, total }: { stats: AdminStats | null; total: number }): React.ReactElement {
@@ -301,7 +354,7 @@ function OverviewPanel({ stats, total }: { stats: AdminStats | null; total: numb
         </div>
       </div>
       <div className="runtime-grid">
-        <RuntimeTile label="ComfyUI" value={stats?.comfyui_base_url} />
+        <RuntimeTile label="健康实例" value={`${stats?.healthy_instance_count ?? 0}/${stats?.instance_count ?? 0}`} />
         <RuntimeTile label="工作流目录" value={stats?.workflows_dir} />
         <RuntimeTile label="输出目录" value={stats?.runs_dir} />
         <RuntimeTile label="任务数据库" value={stats?.database_path} />
@@ -373,30 +426,6 @@ function OutputsPanel({
           </button>
         ))}
         {outputTasks.length === 0 ? <div className="empty-state compact">没有可显示的输出文件</div> : null}
-      </div>
-    </section>
-  );
-}
-
-function RuntimePanel({ stats, kind }: { stats: AdminStats | null; kind: "comfyui" | "workers" }): React.ReactElement {
-  const rows: Array<[string, string | undefined]> =
-    kind === "comfyui"
-      ? [
-          ["服务地址", stats?.comfyui_base_url],
-          ["工作流目录", stats?.workflows_dir],
-          ["Web UI", stats?.ui_enabled ? "启用" : "禁用"]
-        ]
-      : [
-          ["并发数", String(stats?.worker_concurrency ?? "--")],
-          ["运行中", String(stats?.counts.running ?? 0)],
-          ["排队中", String((stats?.counts.pending ?? 0) + (stats?.counts.queued ?? 0))]
-        ];
-  return (
-    <section className="view-panel">
-      <div className="runtime-grid">
-        {rows.map(([label, value]) => (
-          <RuntimeTile label={label} value={value} key={label} />
-        ))}
       </div>
     </section>
   );

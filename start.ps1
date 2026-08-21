@@ -37,20 +37,43 @@ function Set-EnvDefault([string]$Name, [string]$Value) {
 }
 
 function Import-EnvFile([string]$Path) {
-    foreach ($line in Get-Content $Path) {
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    # PowerShell 5.1's Get-Content defaults to the active ANSI codepage, which
+    # mangles UTF-8 files (Chinese comments are read as garbage and adjacent
+    # key=value lines get visually merged). Read the file as raw UTF-8 bytes
+    # so we get exactly the same byte stream that python-dotenv would parse.
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    # Tolerate a UTF-8 BOM if the user (or a tool) added one.
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $bytes = $bytes[3..($bytes.Length - 1)]
+    }
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    # .env files use LF line endings; tolerate CRLF as well.
+    $text = $text -replace "`r`n", "`n"
+    $lines = $text -split "`n"
+
+    foreach ($line in $lines) {
         $trimmed = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) {
             continue
         }
-        if ($trimmed.StartsWith("#")) {
+        # Drop an optional leading '#' / '##' / '###' comment marker so we can
+        # parse a key=value that happens to be documented inline (e.g. a comment
+        # that says "### ... ADMIN_TOKEN=<value>" on the same line).
+        $stripped = $trimmed -replace '^#+', ''
+        $candidate = $stripped.TrimStart()
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
             continue
         }
-        if ($trimmed -notmatch "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$") {
+        if ($candidate -notmatch "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$") {
             continue
         }
 
         $name = $Matches[1]
-        $value = $Matches[2].Trim()
+        $value = $Matches[2]
 
         if ($value.Length -ge 2) {
             if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
@@ -58,7 +81,12 @@ function Import-EnvFile([string]$Path) {
             }
         }
 
-        [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        # Only forward non-empty values to python-dotenv. python-dotenv is
+        # called later with override=False, so an empty PowerShell value would
+        # otherwise shadow the real .env value (env var is "set", even to "").
+        if ($value.Length -gt 0) {
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
     }
 }
 

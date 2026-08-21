@@ -73,14 +73,11 @@ class WorkflowLoadErrorApiTests(unittest.TestCase):
 
         env = {
             "API_TOKEN": "secret-token",
-            "COMFYUI_BASE_URL": "http://127.0.0.1:8188",
-            "COMFYUI_STARTUP_CHECK": "0",
-            "DEFAULT_TXT2IMG_WORKFLOW": workflow_name,
-            "DEFAULT_IMG2IMG_WORKFLOW": workflow_name,
-            "DEFAULT_IMG2VIDEO_WORKFLOW": workflow_name,
+            "ADMIN_TOKEN": "admin-token",
+            "DATA_DIR": str(root / "data"),
+            "DATABASE_PATH": str(root / "data" / "comfyui2api.db"),
             "ENABLE_WORKFLOW_WATCH": "0",
             "RUNS_DIR": str(runs_dir),
-            "WORKER_CONCURRENCY": "1",
             "WORKFLOWS_DIR": str(workflows_dir),
         }
         cls.env_patcher = patch.dict(os.environ, env, clear=False)
@@ -105,8 +102,8 @@ class WorkflowLoadErrorApiTests(unittest.TestCase):
 
     def test_list_workflows_includes_load_errors(self) -> None:
         response = self.client.get(
-            "/v1/workflows",
-            headers={"Authorization": "Bearer secret-token"},
+            "/v1/admin/workflows",
+            headers={"Authorization": "Bearer admin-token"},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -121,8 +118,8 @@ class WorkflowLoadErrorApiTests(unittest.TestCase):
 
     def test_requesting_failed_workflow_returns_load_error(self) -> None:
         response = self.client.get(
-            "/v1/workflows/broken.json/parameters",
-            headers={"Authorization": "Bearer secret-token"},
+            "/v1/admin/workflows/broken.json/parameters",
+            headers={"Authorization": "Bearer admin-token"},
         )
 
         self.assertEqual(response.status_code, 400)

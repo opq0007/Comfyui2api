@@ -5,6 +5,7 @@
 ## ✨ 核心特性
 
 - 🎨 **多模态支持**：文生图 / 图生图 / 文生视频 / 图生视频（以 `comfyui-api-workflows/*.json` 为工作流来源）。
+- 🖥️ **多 Comfy 后端**：在 `/ui` 登记多台实例，按对外模型做轮询/随机选路，离线机自动剔除。
 - 🔄 **热加载支持**：监听工作流目录变更，修改工作流后自动重新加载，无需重启服务。
 - ⏳ **队列与状态管理**：完善的任务生命周期（`pending` / `queued` / `running` / `completed` / `failed`）。
 - 📡 **实时进度推送**：桥接 ComfyUI 的 WebSocket 接口，将执行节点、进度、错误等事件透传给前端，轻松实现实时进度条。
@@ -21,7 +22,7 @@
 
 ## ⚡ 快速开始（本机运行）
 
-> 💡 **前提条件**：确保你的 ComfyUI 已经启动（默认地址：`http://127.0.0.1:8188`）。
+> 💡 **前提条件**：先配置 `API_TOKEN` 与 `ADMIN_TOKEN`。0 个 Comfy 实例也能启动，随后在 `/ui` 添加实例并启用对外模型。
 
 ### 1. 手动启动
 
@@ -31,14 +32,15 @@
 cd E:\AI_Workstation\comfyui2api
 uv sync --locked
 
-# 配置环境变量
-$env:COMFYUI_BASE_URL = "http://127.0.0.1:8188"
-$env:COMFYUI_INPUT_DIR = "E:\\AI_Workstation\\ComfyUI_windows_portable\\ComfyUI\\input"
+$env:API_TOKEN = "change-me-api-token"
+$env:ADMIN_TOKEN = "change-me-admin-token"
 
 # 只启动 API 服务
 uv run --locked --no-sync -m comfyui2api serve
 ```
 命令行模式默认监听在 `0.0.0.0:8000`。无参数或 `ui` 模式会默认监听 `127.0.0.1:8000` 并打开 `/ui`。
+
+启动后打开 `/ui`：输入 `ADMIN_TOKEN` → 添加 ComfyUI 实例 → 创建并启用对外模型。OpenAI / New-API 的 `model` 填该 slug。
 
 ### 2. 🖱️ 一键启动（推荐 Windows 用户）
 
@@ -51,30 +53,20 @@ uv run --locked --no-sync -m comfyui2api serve
 **一键脚本的自动化特性：**
 - 使用 `uv sync --locked` 管理项目虚拟环境与依赖。
 - 默认使用项目级 `.venv\Scripts\python.exe` 作为运行解释器。
-- 默认设置 `COMFYUI_BASE_URL=http://127.0.0.1:8188` 与 `IMAGE_UPLOAD_MODE=comfy`。
-- 自动探测 ComfyUI 是否可达。
 - 如果请求的端口被占用或保留，会自动回退寻找下一个可用端口（请留意终端打印的 `Listening on:` 实际端口）。
 
 **常用启动参数示例：**
 ```powershell
 .\start.ps1 -ListenHost 127.0.0.1 -Port 9000
 .\start.ps1 -CheckOnly       # 仅检查环境不启动
-.\start.ps1 -SkipComfyCheck  # 跳过 ComfyUI 连通性检查
 .\start.ps1 -EnvFile .\.env  # 指定环境变量文件
 ```
 
-> ⚠️ **注意**：如果 `.env` 中设置了 `COMFYUI_STARTUP_CHECK=true` 且 ComfyUI 当前不可达，API 会在启动阶段直接退出。如果想先启动 API 服务，请在 `.env` 中设置为 `false`。
+> ⚠️ **注意**：`API_TOKEN` 与 `ADMIN_TOKEN` 均为必填，缺一则进程拒绝启动。ComfyUI 实例在管理台登记，不再使用 `COMFYUI_BASE_URL`。
 
 ### 🐧 WSL 用户特别说明
 
-如果 `comfyui2api` 运行在 Windows 系统上，而 ComfyUI 运行在 WSL 中，通常无需复杂配置，只需：
-
-```powershell
-$env:COMFYUI_BASE_URL = "http://127.0.0.1:8188"
-$env:IMAGE_UPLOAD_MODE = "comfy"
-```
-
-> 💡 **提示**：推荐将 `IMAGE_UPLOAD_MODE` 设为 `comfy`。这样输入图片会直接通过 ComfyUI 的 HTTP 接口上传到 WSL 的 `input/` 目录中，完全无需配置 Windows 与 WSL 的共享路径！只有明确配置了可互访的路径时，才建议使用 `local` 或 `auto` 模式。
+如果 `comfyui2api` 运行在 Windows 系统上，而 ComfyUI 运行在 WSL 中，在 `/ui` 把实例 URL 填成 `http://127.0.0.1:8188`（或 WSL 的实际地址）即可。输入图一律通过 Comfy `POST /upload/image` 上传，无需共享 Windows/WSL 磁盘路径。
 
 ---
 
@@ -87,43 +79,30 @@ $env:IMAGE_UPLOAD_MODE = "comfy"
 | --- | --- | --- |
 | `API_LISTEN` | `0.0.0.0` | 绑定的 IP 地址 |
 | `API_PORT` | `8000` | 监听的端口 |
-| `API_TOKEN` | *空* | 设置后调用接口需提供 `Authorization: Bearer <token>` |
+| `API_TOKEN` | *必填* | 业务接口 `Authorization: Bearer <token>`；空则拒绝启动 |
+| `ADMIN_TOKEN` | *必填* | 管理台与 `/ui` 密钥门；空则拒绝启动 |
 | `PUBLIC_BASE_URL` | *自动推断* | 生成输出文件的绝对 URL 域名前缀 |
 
-### ComfyUI 交互
-| 变量名 | 默认值 | 描述 |
-| --- | --- | --- |
-| `COMFYUI_BASE_URL` | `http://127.0.0.1:8188` | ComfyUI 服务的地址 |
-| `COMFYUI_STARTUP_CHECK`| `true` | 启动时探测系统状态，失败则退出 |
-| `IMAGE_UPLOAD_MODE` | `auto` | `comfy` (调接口上传，推荐) / `local` (写本地文件) / `auto` (优先 comfy，失败回退) |
-| `COMFYUI_INPUT_DIR` | *空* | ComfyUI 的 `input` 本地绝对路径 (仅在写本地模式下需要) |
-
-### 路径与并发控制
+### 路径与巡检
 | 变量名 | 默认值 | 描述 |
 | --- | --- | --- |
 | `WORKFLOWS_DIR` | `.\comfyui-api-workflows` | API 工作流存放目录 |
 | `RUNS_DIR` | `.\runs` | 任务输出文件的存放目录 |
-| `DATA_DIR` | `.\data` | SQLite 任务历史数据库目录 |
-| `DATABASE_PATH` | `.\data\comfyui2api.db` | SQLite 任务历史数据库路径 |
+| `DATA_DIR` | `.\data` | SQLite 任务历史与实例/模型配置目录 |
+| `DATABASE_PATH` | `.\data\comfyui2api.db` | SQLite 路径 |
 | `COMFYUI2API_UI_ENABLED` | `true` | 是否挂载内置 Web UI |
 | `COMFYUI2API_DISABLE_UI` | `false` | 设为 `1` 时禁用 `/ui` |
-| `COMFYUI2API_NO_OPEN` | `false` | UI 模式启动服务但不自动打开浏览器，主要用于 CI/自动化验证 |
-| `COMFYUI2API_NO_WINDOW` | `false` | 打包版 UI 模式不显示本地控制窗口，主要用于 CI/自动化验证 |
-| `ADMIN_TOKEN` | *继承 API_TOKEN* | 管理台 REST/WebSocket 鉴权令牌 |
-| `INPUT_SUBDIR` | `comfyui2api` | 写入 ComfyUI input 时的专属子目录 |
-| `WORKER_CONCURRENCY` | `1` | 同时并发运行的任务数量 |
-| `JOB_RETENTION_DAYS`  | *空* | 已完成/失败任务在内存和磁盘中的保留天数，设置后优先于 `JOB_RETENTION_SECONDS` |
+| `COMFYUI2API_NO_OPEN` | `false` | UI 模式启动服务但不自动打开浏览器 |
+| `COMFYUI2API_NO_WINDOW` | `false` | 打包版 UI 模式不显示本地控制窗口 |
+| `INPUT_SUBDIR` | `comfyui2api` | 上传到 ComfyUI input 时的 subfolder 名 |
+| `HEALTH_CHECK_INTERVAL_S` | `60` | 全局巡检间隔 |
+| `HEALTH_CHECK_TIMEOUT_S` | `5` | 单次探活超时 |
+| `HEALTH_CHECK_FAIL_THRESHOLD` | `3` | 连续失败后标记 unhealthy |
+| `HEALTH_CHECK_RECOVERY_THRESHOLD` | `1` | 连续成功后回到 healthy |
+| `JOB_RETENTION_DAYS`  | *空* | 已完成/失败任务在内存和磁盘中的保留天数 |
 | `JOB_RETENTION_SECONDS`| `604800` (7天) | 已完成/失败任务在内存和磁盘中的保留时间 |
 | `MAX_JOBS_IN_MEMORY` | `1000` | 内存中最多保留的任务记录数 |
 | `JOB_CLEANUP_INTERVAL_S`| `60` | 后台清理过期任务的扫描间隔（秒） |
-
-### 默认工作流与安全
-| 变量名 | 默认值 | 描述 |
-| --- | --- | --- |
-| `DEFAULT_TXT2IMG_WORKFLOW` | `文生图_z_image_turbo.json` | 默认文生图工作流 |
-| `DEFAULT_IMG2IMG_WORKFLOW` | `图生图_flux2.json` | 默认图生图工作流 |
-| `DEFAULT_TXT2VIDEO_WORKFLOW`| *空* | 默认文生视频工作流（需自行提供） |
-| `DEFAULT_IMG2VIDEO_WORKFLOW`| `img2video.json` | 默认图生视频工作流 |
 | `SIGNED_URL_SECRET` | 继承 `API_TOKEN` | 媒体下载短期签名的加密密钥 |
 | `SIGNED_URL_TTL_SECONDS` | `3600` | 生成的媒体访问链接有效期（秒） |
 
@@ -158,9 +137,12 @@ http://127.0.0.1:8000/ui
 - `GET /v1/admin/tasks`：按时间、任务 ID、状态、类型、平台筛选任务。
 - `GET /v1/admin/tasks/{job_id}`：查看任务详情和输出文件。
 - `GET /v1/admin/stats`：查看运行时目录、数据库路径和统计信息。
+- `GET /v1/admin/instances` / `POST|PATCH|DELETE /v1/admin/instances/{slug}`：ComfyUI 实例。
+- `GET /v1/admin/models` / `POST|PATCH|DELETE /v1/admin/models/{slug}`：对外模型。
+- `GET /v1/admin/workflows*`：工作流内省（仅管理鉴权）。
 - `WS /v1/admin/tasks/ws`：订阅全局任务变化。
 
-如果配置了 `ADMIN_TOKEN`，管理台优先使用它；否则复用 `API_TOKEN`。REST 请求使用：
+管理台必须使用 `ADMIN_TOKEN`，不再回退 `API_TOKEN`。REST 请求使用：
 
 ```text
 Authorization: Bearer <token>
@@ -239,7 +221,7 @@ comfyui2api/
 
 默认情况下接口均为 **同步返回**。如需异步并返回 `job_id` (以便前端渲染进度条)，请在 Request Header 中加上 `x-comfyui-async: 1`。
 
-- `GET /v1/models`：将工作流列表伪装为 models 返回。
+- `GET /v1/models`：列出已启用的对外模型（`id` 为 slug，含 `ready` / `kind` 数组）。
 - `POST /v1/images/generations`：文生图，支持 `response_format=url`、`b64_json`、`base64`。
 - `POST /v1/images/edits`：图生图（需提交 multipart，字段为 `image`）。
 - `POST /v1/images/variations`：图生图变体（需提交 multipart，字段为 `image`）。
@@ -257,7 +239,7 @@ comfyui2api/
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/images/generations \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"a cute cat, pixel art"}'
+   -d '{"prompt":"a cute cat, pixel art","model":"z-image-turbo"}'
 ```
 
 **调用示例（文生图 异步）：**
@@ -265,14 +247,14 @@ curl -s -X POST http://127.0.0.1:8000/v1/images/generations \
 curl -s -X POST http://127.0.0.1:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "x-comfyui-async: 1" \
-  -d '{"prompt":"a cute cat, pixel art"}'
+   -d '{"prompt":"a cute cat, pixel art","model":"z-image-turbo"}'
 ```
 
 **调用示例（文生图 Base64 返回）：**
 ```bash
 curl -s -X POST http://127.0.0.1:8000/v1/images/generations \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"a cute cat, pixel art","response_format":"b64_json"}'
+   -d '{"prompt":"a cute cat, pixel art","model":"z-image-turbo","response_format":"b64_json"}'
 ```
 
 > 💡 **媒体访问说明**：
@@ -284,11 +266,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/images/generations \
 
 如果 OpenAI 格式不能满足你的复杂工作流需求，可以直接调用原生接口：
 
-- `GET /v1/workflows`：列出所有工作流（包含最后修改时间、类型及加载失败的排错信息）。
-- `GET /v1/workflows/{name}/targets`：查看 prompt/image 可供替换的候选节点。
-- `GET /v1/workflows/{name}/parameters`：查看工作流的高级映射参数和建议模板。
-- `GET /v1/workflows/{name}/parameters/template`：直接返回可复制的 sidecar 模板 JSON。
-- `POST /v1/jobs`：通用任务提交（最强大的接口，可指定所有底层节点重写）。
+- `POST /v1/jobs`：通用任务提交；必须带对外模型 `model`，不要再传工作流文件名选路。
 - `GET /v1/jobs/{job_id}`：查询任务详情。
 - `GET /v1/queue`：查看当前队列概览。
 - `WS /v1/jobs/{job_id}/ws`：WebSocket 端点，推送实时事件流（progress/executing/status 等）。
@@ -339,7 +317,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/jobs \
   -d @- <<'JSON'
 {
   "kind": "txt2img",
-  "workflow": "文生图_z_image_turbo.json",
+  "model": "z-image-turbo",
   "prompt": "a cute cat, pixel art",
   "prompt_node": "57:27.text"
 }
@@ -357,7 +335,7 @@ curl -s -X POST http://127.0.0.1:8000/v1/jobs \
   -d @- <<'JSON'
 {
   "kind": "img2img",
-  "workflow": "图生图_flux2.json",
+  "model": "flux2-img2img",
   "prompt": "make it cinematic lighting",
   "image": "comfyui2api/your_input.jpg",
   "image_node": "46.image"
@@ -383,4 +361,4 @@ JSON
 
 ## 🐳 Docker 部署（可选）
 
-项目根目录下提供了 `docker-compose.yml` 基础模板。部署前，请根据你实际的内网/外网网络环境，在配置文件中填入对应的 `COMFYUI_BASE_URL` 和相关参数，直接 `docker compose up -d` 即可起飞。
+项目根目录下提供了 `docker-compose.yml` 基础模板。部署前必须设置 `API_TOKEN` 与 `ADMIN_TOKEN`，然后 `docker compose up -d`。ComfyUI 实例在管理台登记，不要再注入 `COMFYUI_BASE_URL`。

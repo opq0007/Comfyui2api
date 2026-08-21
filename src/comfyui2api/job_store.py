@@ -89,6 +89,8 @@ class JobStore:
                     kind TEXT NOT NULL,
                     workflow TEXT NOT NULL,
                     requested_model TEXT,
+                    model_slug TEXT,
+                    instance_slug TEXT,
 
                     status TEXT NOT NULL,
                     progress_percent INTEGER NOT NULL DEFAULT 0,
@@ -125,6 +127,8 @@ class JobStore:
                 CREATE INDEX IF NOT EXISTS idx_task_outputs_job_id ON task_outputs(job_id);
                 """
             )
+            _ensure_column(con, "tasks", "model_slug", "TEXT")
+            _ensure_column(con, "tasks", "instance_slug", "TEXT")
             con.commit()
 
     def _upsert_job_sync(self, job: Job) -> None:
@@ -135,13 +139,15 @@ class JobStore:
                 INSERT INTO tasks (
                     job_id, created_at, created_at_utc, started_at_utc, finished_at_utc,
                     updated_at_utc, duration_s, platform, kind, workflow, requested_model,
-                    status, progress_percent, progress_json, prompt_id, queue_number,
-                    current_node, url, output_count, error, prompt_preview, request_json
+                    model_slug, instance_slug, status, progress_percent, progress_json,
+                    prompt_id, queue_number, current_node, url, output_count, error,
+                    prompt_preview, request_json
                 ) VALUES (
                     :job_id, :created_at, :created_at_utc, :started_at_utc, :finished_at_utc,
                     :updated_at_utc, :duration_s, :platform, :kind, :workflow, :requested_model,
-                    :status, :progress_percent, :progress_json, :prompt_id, :queue_number,
-                    :current_node, :url, :output_count, :error, :prompt_preview, :request_json
+                    :model_slug, :instance_slug, :status, :progress_percent, :progress_json,
+                    :prompt_id, :queue_number, :current_node, :url, :output_count, :error,
+                    :prompt_preview, :request_json
                 )
                 ON CONFLICT(job_id) DO UPDATE SET
                     started_at_utc=excluded.started_at_utc,
@@ -152,6 +158,8 @@ class JobStore:
                     kind=excluded.kind,
                     workflow=excluded.workflow,
                     requested_model=excluded.requested_model,
+                    model_slug=excluded.model_slug,
+                    instance_slug=excluded.instance_slug,
                     status=excluded.status,
                     progress_percent=excluded.progress_percent,
                     progress_json=excluded.progress_json,
@@ -288,7 +296,9 @@ def _job_to_row(job: Job) -> dict[str, Any]:
         "platform": job.platform or "Native",
         "kind": job.kind,
         "workflow": job.workflow,
-        "requested_model": job.requested_model or None,
+        "requested_model": job.requested_model or job.model_slug or None,
+        "model_slug": job.model_slug or job.requested_model or None,
+        "instance_slug": job.instance_slug or None,
         "status": job.status,
         "progress_percent": int(job.progress_percent or 0),
         "progress_json": json.dumps(job.progress or {}, ensure_ascii=False),
@@ -356,6 +366,12 @@ def _json_loads(value: Any, default: Any) -> Any:
         return json.loads(str(value))
     except Exception:
         return default
+
+
+def _ensure_column(con: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cols = {str(row[1]) for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def _truncate(value: str, *, limit: int = 300) -> str:
