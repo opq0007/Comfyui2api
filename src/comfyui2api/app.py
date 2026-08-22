@@ -601,15 +601,26 @@ def create_app() -> FastAPI:
                 urls.append(url)
         return urls
 
-    def _first_output_filename(outputs: list[dict[str, Any]]) -> str:
+    def _output_filename(item: Mapping[str, Any]) -> str:
+        filename = str(item.get("filename") or "").strip()
+        if filename:
+            return filename
+        raw_url = str(item.get("url") or "").strip()
+        return Path(raw_url).name if raw_url else ""
+
+    def _b64_json_data(job_id: str, outputs: list[dict[str, Any]]) -> list[dict[str, str]]:
+        encoded: list[dict[str, str]] = []
         for item in outputs:
-            filename = str(item.get("filename") or "").strip()
-            if filename:
-                return filename
-            raw_url = str(item.get("url") or "").strip()
-            if raw_url:
-                return Path(raw_url).name
-        return ""
+            filename = _output_filename(item)
+            if not filename:
+                continue
+            path = Path(cfg.runs_dir) / job_id / filename
+            if not path.is_file():
+                continue
+            encoded.append({"b64_json": base64.b64encode(path.read_bytes()).decode("ascii")})
+        if not encoded:
+            raise _openai_error("No outputs produced", http_status=500)
+        return encoded
 
     def _normalize_image_response_format(value: Any) -> str:
         raw = str(value or "url").strip().lower()
@@ -801,11 +812,7 @@ def create_app() -> FastAPI:
             payload["video_id"] = _video_id(str(done.get("job_id") or job.job_id))
 
         if response_format == "b64_json" and kind in {"txt2img", "img2img"}:
-            filename = _first_output_filename(outputs)
-            if not filename:
-                raise _openai_error("No outputs produced", http_status=500)
-            p = Path(cfg.runs_dir) / job.job_id / filename
-            payload["data"] = [{"b64_json": base64.b64encode(p.read_bytes()).decode("ascii")}]
+            payload["data"] = _b64_json_data(str(done.get("job_id") or job.job_id), outputs)
         else:
             urls = _response_output_urls(
                 request,
@@ -999,7 +1006,9 @@ def create_app() -> FastAPI:
         workflow = wf.name
         negative_prompt = str(body.get("negative_prompt") or "").strip()
         response_format = _normalize_image_response_format(body.get("response_format"))
-        standard_params = _collect_standard_params({key: body.get(key) for key in STANDARD_PARAMETER_ORDER if key in body})
+        standard_params = _collect_standard_params(
+            {key: body.get(key) for key in (*STANDARD_PARAMETER_ORDER, "n") if key in body}
+        )
 
         job = await jobs.create_job(
             kind="txt2img",
@@ -1022,12 +1031,10 @@ def create_app() -> FastAPI:
             authorization=authorization,
         )
         if response_format == "b64_json":
-            filename = _first_output_filename(outputs)
-            if not filename:
-                raise _openai_error("No outputs produced", http_status=500)
-            p = Path(cfg.runs_dir) / job.job_id / filename
-            data = base64.b64encode(p.read_bytes()).decode("ascii")
-            return {"created": utc_now_unix(), "data": [{"b64_json": data}]}
+            return {
+                "created": utc_now_unix(),
+                "data": _b64_json_data(str(done.get("job_id") or job.job_id), outputs),
+            }
         return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     @app.post("/v1/images/edits")
@@ -1086,12 +1093,10 @@ def create_app() -> FastAPI:
             authorization=authorization,
         )
         if _normalize_image_response_format(response_format) == "b64_json":
-            filename = _first_output_filename(outputs)
-            if not filename:
-                raise _openai_error("No outputs produced", http_status=500)
-            p = Path(cfg.runs_dir) / job.job_id / filename
-            data = base64.b64encode(p.read_bytes()).decode("ascii")
-            return {"created": utc_now_unix(), "data": [{"b64_json": data}]}
+            return {
+                "created": utc_now_unix(),
+                "data": _b64_json_data(str(done.get("job_id") or job.job_id), outputs),
+            }
         return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     @app.post("/v1/images/variations")
@@ -1147,12 +1152,10 @@ def create_app() -> FastAPI:
             authorization=authorization,
         )
         if _normalize_image_response_format(response_format) == "b64_json":
-            filename = _first_output_filename(outputs)
-            if not filename:
-                raise _openai_error("No outputs produced", http_status=500)
-            p = Path(cfg.runs_dir) / job.job_id / filename
-            data = base64.b64encode(p.read_bytes()).decode("ascii")
-            return {"created": utc_now_unix(), "data": [{"b64_json": data}]}
+            return {
+                "created": utc_now_unix(),
+                "data": _b64_json_data(str(done.get("job_id") or job.job_id), outputs),
+            }
         return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     @app.post("/v1/videos/generations")

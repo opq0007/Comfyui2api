@@ -139,6 +139,51 @@ class WorkflowParameterMappingTests(unittest.TestCase):
             self.assertEqual(template["parameters"]["duration"]["maps"][0]["transform"], "seconds_to_frames")
             self.assertEqual(template["parameters"]["duration"]["maps"][0]["fps_param"], "fps")
 
+    def test_z_image_turbo_fp16_sidecar_maps_size_n_and_seed(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "z_image_turbo_fp16.json"
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="txt2img",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "67.text")
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={"size": "768x512", "n": 3, "seed": 42, "steps": 6, "cfg": 1.5},
+        )
+        self.assertEqual(
+            overrides,
+            [
+                ("68", "width", 768),
+                ("68", "height", 512),
+                ("68", "batch_size", 3),
+                ("70", "steps", 6),
+                ("70", "cfg", 1.5),
+                ("70", "seed", 42),
+            ],
+        )
+
+        width_only = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={"width": 640, "height": 480},
+        )
+        self.assertIn(("68", "width", 640), width_only)
+        self.assertIn(("68", "height", 480), width_only)
+
+        detected = detect_parameter_candidates(workflow_obj)
+        self.assertEqual(detected["size"][0]["maps"][0]["ref"], "68.width")
+        self.assertEqual(detected["n"][0]["maps"][0]["ref"], "68.batch_size")
+        self.assertEqual(detected["seed"][0]["maps"][0]["ref"], "70.seed")
+
     def test_sidecar_mapping_loads_explicit_prompt_and_image_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

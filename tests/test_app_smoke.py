@@ -424,6 +424,75 @@ class AppSmokeTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(base64.b64decode(payload["data"][0]["b64_json"]), raw_bytes)
 
+    def test_images_generations_returns_all_outputs_for_url_and_b64(self) -> None:
+        from comfyui2api.jobs import Job, JobOutput
+
+        done = asyncio.Event()
+        done.set()
+        job_id = "job-image-multi"
+        out_dir = Path(os.environ["RUNS_DIR"]) / job_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        first = b"first-image-bytes"
+        second = b"second-image-bytes"
+        (out_dir / "image-1.png").write_bytes(first)
+        (out_dir / "image-2.png").write_bytes(second)
+
+        job = Job(
+            job_id=job_id,
+            created_at_utc="2026-03-16T00:00:00Z",
+            created_at=123,
+            status="completed",
+            kind="txt2img",
+            workflow=self.workflow_name,
+            requested_model="test_txt2img",
+            url=f"/runs/{job_id}/image-1.png",
+            outputs=[
+                JobOutput(
+                    filename="image-1.png",
+                    url=f"/runs/{job_id}/image-1.png",
+                    media_type="image/png",
+                    node_id="2",
+                    output_key="images",
+                ),
+                JobOutput(
+                    filename="image-2.png",
+                    url=f"/runs/{job_id}/image-2.png",
+                    media_type="image/png",
+                    node_id="2",
+                    output_key="images",
+                ),
+            ],
+            done=done,
+        )
+
+        with (
+            patch.object(self.app.state.jobs, "create_job", AsyncMock(return_value=SimpleNamespace(job_id=job_id))),
+            patch.object(self.app.state.jobs, "get_job", AsyncMock(return_value=job)),
+        ):
+            url_response = self.client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={"prompt": "cat", "model": "test_txt2img", "n": 2},
+            )
+            b64_response = self.client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={"prompt": "cat", "model": "test_txt2img", "n": 2, "response_format": "b64_json"},
+            )
+
+        self.assertEqual(url_response.status_code, 200)
+        url_payload = url_response.json()
+        self.assertEqual(len(url_payload["data"]), 2)
+        self.assertTrue(all("url" in item for item in url_payload["data"]))
+        self.assertIn("/runs/job-image-multi/image-1.png", url_payload["data"][0]["url"])
+        self.assertIn("/runs/job-image-multi/image-2.png", url_payload["data"][1]["url"])
+
+        self.assertEqual(b64_response.status_code, 200)
+        b64_payload = b64_response.json()
+        self.assertEqual(len(b64_payload["data"]), 2)
+        self.assertEqual(base64.b64decode(b64_payload["data"][0]["b64_json"]), first)
+        self.assertEqual(base64.b64decode(b64_payload["data"][1]["b64_json"]), second)
+
     def test_images_edits_rejects_txt2img_workflow_with_clear_400(self) -> None:
         mock_create_job = AsyncMock()
         with patch.object(self.app.state.jobs, "create_job", mock_create_job):
