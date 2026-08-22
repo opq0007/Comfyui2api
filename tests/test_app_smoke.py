@@ -150,6 +150,54 @@ class AppSmokeTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        img2img_workflow_name = "test_img2img.json"
+        (workflows_dir / img2img_workflow_name).write_text(
+            json.dumps(
+                {
+                    "prompt": {
+                        "76": {"class_type": "LoadImage", "inputs": {"image": "primary.png"}},
+                        "81": {"class_type": "LoadImage", "inputs": {"image": "secondary.png"}},
+                        "94": {"class_type": "SaveImage", "inputs": {"filename_prefix": "sample"}},
+                        "125": {"class_type": "RandomNoise", "inputs": {"noise_seed": 1}},
+                        "129": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+                        "135": {"class_type": "CLIPTextEncode", "inputs": {"text": "hello"}},
+                        "137": {"class_type": "KSampler", "inputs": {"steps": 4, "cfg": 1}},
+                        "705": {
+                            "class_type": "INTConstant",
+                            "inputs": {"value": 1},
+                            "_meta": {"title": "inputImgCount"},
+                        },
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (workflows_dir / ".comfyui2api" / "test_img2img.params.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "kind": "img2img",
+                    "prompt_node": "135.text",
+                    "image_node": "76.image",
+                    "parameters": {
+                        "n": {"type": "int", "minimum": 1, "maps": [{"target": "129.batch_size"}]},
+                        "steps": {"type": "int", "maps": [{"target": "137.steps"}]},
+                        "cfg": {"type": "float", "maps": [{"target": "137.cfg"}]},
+                        "seed": {"type": "int", "maps": [{"target": "125.noise_seed"}]},
+                        "image2": {"type": "image", "maps": [{"target": "81.image"}]},
+                        "inputImgCount": {
+                            "type": "int",
+                            "default": 1,
+                            "minimum": 1,
+                            "maps": [{"target": "705.value"}],
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
         env = {
             "API_TOKEN": "secret-token",
@@ -172,6 +220,7 @@ class AppSmokeTests(unittest.TestCase):
         cls.txt2video_workflow_name = txt2video_workflow_name
         cls.hybrid_video_workflow_name = hybrid_video_workflow_name
         cls.dual_input_video_workflow_name = dual_input_video_workflow_name
+        cls.img2img_workflow_name = img2img_workflow_name
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -202,6 +251,7 @@ class AppSmokeTests(unittest.TestCase):
             ("test_txt2video", self.txt2video_workflow_name),
             ("test_hybrid_video", self.hybrid_video_workflow_name),
             ("test_dual_input_video", self.dual_input_video_workflow_name),
+            ("test_img2img", self.img2img_workflow_name),
         ):
             self.client.post(
                 "/v1/admin/models",
@@ -509,6 +559,144 @@ class AppSmokeTests(unittest.TestCase):
         self.assertIn("does not support img2img", payload["error"]["message"])
         self.assertIn("missing LoadImage", payload["error"]["message"])
         mock_create_job.assert_not_awaited()
+
+    def test_images_edits_collects_repeated_image_fields_and_sidecar_params(self) -> None:
+        mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-multi"))
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                data={"prompt": "make it cinematic", "model": "test_img2img", "n": "2", "steps": "6"},
+                files=[
+                    ("image[]", ("one.png", b"first-image", "image/png")),
+                    ("image[]", ("two.png", b"second-image", "image/png")),
+                ],
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2img")
+        self.assertEqual(kwargs["workflow"], self.img2img_workflow_name)
+        self.assertEqual(kwargs["prompt"], "make it cinematic")
+        self.assertTrue(kwargs["image"])
+        self.assertEqual(kwargs["standard_params"]["n"], "2")
+        self.assertEqual(kwargs["standard_params"]["steps"], "6")
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 2)
+        self.assertTrue(kwargs["standard_params"]["image2"])
+        self.assertNotEqual(kwargs["image"], kwargs["standard_params"]["image2"])
+
+    def test_images_edits_accepts_json_images_array(self) -> None:
+        first = "data:image/png;base64," + base64.b64encode(b"json-one").decode("ascii")
+        second = "data:image/png;base64," + base64.b64encode(b"json-two").decode("ascii")
+        mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-json"))
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                json={
+                    "prompt": "edit both",
+                    "model": "test_img2img",
+                    "images": [first, second],
+                    "seed": 9,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 2)
+        self.assertEqual(kwargs["standard_params"]["seed"], 9)
+        self.assertTrue(kwargs["standard_params"]["image2"])
+
+    def test_images_edits_single_image_sets_input_count_default(self) -> None:
+        mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-one"))
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                data={"prompt": "edit one", "model": "test_img2img"},
+                files={"image": ("one.png", b"only-image", "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 1)
+        self.assertNotIn("image2", kwargs["standard_params"])
+
+    def test_images_edits_collects_indexed_image_fields(self) -> None:
+        mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-indexed"))
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                data={"prompt": "edit indexed", "model": "test_img2img"},
+                files=[
+                    ("image[0]", ("one.png", b"first-indexed", "image/png")),
+                    ("image[1]", ("two.png", b"second-indexed", "image/png")),
+                ],
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 2)
+        self.assertTrue(kwargs["standard_params"]["image2"])
+        self.assertNotEqual(kwargs["image"], kwargs["standard_params"]["image2"])
+
+    def test_images_edits_collects_image_plus_image2_fields(self) -> None:
+        mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-image2"))
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                data={"prompt": "edit numbered", "model": "test_img2img"},
+                files=[
+                    ("image", ("one.png", b"first-numbered", "image/png")),
+                    ("image2", ("two.png", b"second-numbered", "image/png")),
+                ],
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 2)
+        self.assertTrue(kwargs["standard_params"]["image2"])
+        self.assertNotEqual(kwargs["image"], kwargs["standard_params"]["image2"])
+
+    def test_collect_edit_image_items_accepts_client_field_aliases(self) -> None:
+        collect = self.app_module.collect_edit_image_items
+        self.assertEqual(
+            collect(values={"image[0]": "one", "image[1]": "two"}, is_form=True),
+            ["one", "two"],
+        )
+        self.assertEqual(
+            collect(values={"image": "one", "image2": "two"}, is_form=True),
+            ["one", "two"],
+        )
+        self.assertEqual(
+            collect(values={"image": ["one", "two"]}, is_form=True),
+            ["one", "two"],
+        )
+        self.assertEqual(
+            collect(values={"image": "one", "image[]": "two", "image2": "two"}, is_form=True),
+            ["one", "two"],
+        )
+
+    def test_images_edits_collects_repeated_image_field(self) -> None:
+        mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-repeat"))
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                data={"prompt": "edit repeated", "model": "test_img2img"},
+                files=[
+                    ("image", ("one.png", b"first-repeat", "image/png")),
+                    ("image", ("two.png", b"second-repeat", "image/png")),
+                ],
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 2)
+        self.assertTrue(kwargs["standard_params"]["image2"])
+        self.assertNotEqual(kwargs["image"], kwargs["standard_params"]["image2"])
 
     def test_videos_create_passes_duration_and_fps_standard_params(self) -> None:
         mock_create_job = AsyncMock(

@@ -62,6 +62,20 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg.job_retention_seconds, 120)
 
+    def test_http_timeout_defaults_to_ten_minutes(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "API_TOKEN": "api-token",
+                "ADMIN_TOKEN": "admin-token",
+                "HTTP_TIMEOUT_S": "",
+            },
+            clear=False,
+        ):
+            cfg = load_config()
+
+        self.assertEqual(cfg.http_timeout_s, 600)
+
     def test_missing_tokens_raise_config_error(self) -> None:
         from comfyui2api.errors import ConfigError
 

@@ -184,6 +184,50 @@ class WorkflowParameterMappingTests(unittest.TestCase):
         self.assertEqual(detected["n"][0]["maps"][0]["ref"], "68.batch_size")
         self.assertEqual(detected["seed"][0]["maps"][0]["ref"], "70.seed")
 
+    def test_kaggle_flux2_edit_sidecar_maps_second_image_and_input_count(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "kaggle_flux2_klein_9b_kv_image_edit_api.json"
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="img2img",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "135.text")
+        self.assertEqual(spec.image_node, "76.image")
+        self.assertEqual(spec.parameters["inputImgCount"].default, 1)
+
+        single = resolve_standard_overrides(workflow_obj=workflow_obj, spec=spec, request_params={})
+        self.assertIn(("705", "value", 1), single)
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={
+                "n": 2,
+                "steps": 8,
+                "cfg": 1.2,
+                "seed": 11,
+                "image2": "uploads/second.png",
+                "inputImgCount": 2,
+            },
+        )
+        self.assertEqual(
+            overrides,
+            [
+                ("129", "batch_size", 2),
+                ("137", "steps", 8),
+                ("138", "cfg", 1.2),
+                ("125", "noise_seed", 11),
+                ("81", "image", "uploads/second.png"),
+                ("705", "value", 2),
+            ],
+        )
+
     def test_sidecar_mapping_loads_explicit_prompt_and_image_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

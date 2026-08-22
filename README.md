@@ -106,6 +106,9 @@ uv run --locked --no-sync -m comfyui2api serve
 | `JOB_CLEANUP_INTERVAL_S`| `60` | 后台清理过期任务的扫描间隔（秒） |
 | `SIGNED_URL_SECRET` | 继承 `API_TOKEN` | 媒体下载短期签名的加密密钥 |
 | `SIGNED_URL_TTL_SECONDS` | `3600` | 生成的媒体访问链接有效期（秒） |
+| `TIMEOUT_S` | `3600` | 等待 ComfyUI 任务完成的上限（秒）；超时后任务失败 |
+| `POLL_INTERVAL_S` | `0.5` | 轮询 ComfyUI `/history` 的间隔（秒） |
+| `HTTP_TIMEOUT_S` | `600` | 访问 ComfyUI HTTP（提交 prompt、拉 history、下载输出）的单次超时（秒），默认 10 分钟 |
 
 ---
 

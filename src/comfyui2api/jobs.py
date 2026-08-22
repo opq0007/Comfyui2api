@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .backend_store import BackendStore
-from .comfy_client import ComfyApiError, ComfyUIClient
+from .comfy_client import ComfyApiError, ComfyUIClient, history_entry_error, history_entry_is_complete
 from .comfy_workflow import (
     iter_file_outputs,
     normalize_prompt_enum_inputs,
@@ -490,7 +490,11 @@ class JobManager:
                     )
                     history = await hist_task
                     break
-                history = await hist_task
+                history = await self._history_after_ws(
+                    client=client,
+                    prompt_id=qp.prompt_id,
+                    hist_task=hist_task,
+                )
                 break
 
             if hist_task in done:
@@ -545,6 +549,26 @@ class JobManager:
         if job:
             job.done.set()
 
+    async def _history_after_ws(
+        self,
+        *,
+        client: ComfyUIClient,
+        prompt_id: str,
+        hist_task: asyncio.Task[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        entry = await client.get_history_entry(prompt_id)
+        if entry:
+            error = history_entry_error(entry)
+            if error:
+                hist_task.cancel()
+                await asyncio.gather(hist_task, return_exceptions=True)
+                raise ComfyApiError(error)
+            if history_entry_is_complete(entry):
+                hist_task.cancel()
+                await asyncio.gather(hist_task, return_exceptions=True)
+                return entry
+        return await hist_task
+
     async def _monitor_ws(self, *, job_id: str, client: ComfyUIClient, client_id: str, prompt_id: str) -> None:
         async for msg in client.ws_events(client_id=client_id):
             await self._publish(job_id, {"type": "comfyui_ws", "data": msg})
@@ -559,6 +583,11 @@ class JobManager:
                     return
                 await self._update(job_id, status="running", current_node=str(node))
                 await self._publish(job_id, {"type": "job_running", "data": {"node": str(node)}})
+            elif mtype == "execution_success" and isinstance(data, dict):
+                pid = data.get("prompt_id")
+                if pid and pid != prompt_id:
+                    continue
+                return
             elif mtype == "progress" and isinstance(data, dict):
                 await self._update(job_id, progress=data)
                 await self._publish(job_id, {"type": "job_progress", "data": data})

@@ -5,6 +5,7 @@ import base64
 import ipaddress
 import json
 import logging
+import re
 import socket
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -233,7 +234,7 @@ async def _collect_workflow_request_params(
     skipped = set(skip or ())
     params: dict[str, Any] = {}
     for name, definition in spec.parameters.items():
-        if name in skipped or name not in values:
+        if name in skipped or _is_edit_image_field_name(name) or name not in values:
             continue
         raw_value = values.get(name)
         if definition.type == "image":
@@ -255,6 +256,163 @@ async def _collect_workflow_request_params(
             continue
         params[name] = cleaned
     return params
+
+
+_EDIT_IMAGE_FIELD_NAMES = ("image", "image[]", "images")
+_EDIT_IMAGE_MAX = 16
+_EDIT_INDEXED_IMAGE_RE = re.compile(r"^image\[(\d+)\]$")
+_EDIT_NUMBERED_IMAGE_RE = re.compile(r"^image(\d+)$")
+_EDIT_RESERVED_FIELDS = {
+    "prompt",
+    "model",
+    "workflow",
+    "negative_prompt",
+    "response_format",
+    "mask",
+    "image",
+    "image[]",
+    "images",
+    *STANDARD_PARAMETER_ORDER,
+}
+
+
+def _mapping_getlist(values: Any, name: str) -> list[Any]:
+    if values is None:
+        return []
+    getlist = getattr(values, "getlist", None)
+    if callable(getlist):
+        raw_list = getlist(name)
+        if raw_list is None:
+            return []
+        if isinstance(raw_list, list):
+            return list(raw_list)
+        return [raw_list]
+    if not hasattr(values, "get"):
+        return []
+    raw = values.get(name)
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return list(raw)
+    return [raw]
+
+
+def _is_empty_edit_image_item(item: Any) -> bool:
+    if item is None:
+        return True
+    if isinstance(item, str):
+        return not item.strip()
+    filename = getattr(item, "filename", None)
+    if filename is not None and str(filename).strip() == "" and not hasattr(item, "read"):
+        return True
+    return False
+
+
+def _is_edit_image_field_name(name: str) -> bool:
+    if name in _EDIT_IMAGE_FIELD_NAMES:
+        return True
+    if _EDIT_INDEXED_IMAGE_RE.match(name):
+        return True
+    match = _EDIT_NUMBERED_IMAGE_RE.match(name)
+    return bool(match) and int(match.group(1)) >= 1
+
+
+def _edit_image_item_marker(item: Any) -> Any:
+    if isinstance(item, (str, bytes, int, float, bool)):
+        return ("v", item)
+    return ("id", id(item))
+
+
+def _dedupe_edit_image_items(items: list[Any]) -> list[Any]:
+    seen: set[Any] = set()
+    unique: list[Any] = []
+    for item in items:
+        marker = _edit_image_item_marker(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(item)
+    return unique
+
+
+def _iter_mapping_pairs(values: Any) -> list[tuple[str, Any]]:
+    if values is None:
+        return []
+    multi_items = getattr(values, "multi_items", None)
+    if callable(multi_items):
+        raw_pairs = list(multi_items())
+        return [(str(key), value) for key, value in raw_pairs]
+    items_fn = getattr(values, "items", None)
+    if not callable(items_fn):
+        return []
+    pairs: list[tuple[str, Any]] = []
+    for key, value in list(items_fn()):
+        name = str(key)
+        if isinstance(value, list):
+            pairs.extend((name, item) for item in value)
+        else:
+            pairs.append((name, value))
+    return pairs
+
+
+def _collect_named_edit_image_items(values: Any) -> list[Any]:
+    canonical: list[Any] = []
+    indexed: list[tuple[int, Any]] = []
+    numbered: list[tuple[int, Any]] = []
+    pairs = _iter_mapping_pairs(values)
+    if pairs:
+        for name, value in pairs:
+            if name in _EDIT_IMAGE_FIELD_NAMES:
+                canonical.append(value)
+                continue
+            indexed_match = _EDIT_INDEXED_IMAGE_RE.match(name)
+            if indexed_match:
+                indexed.append((int(indexed_match.group(1)), value))
+                continue
+            numbered_match = _EDIT_NUMBERED_IMAGE_RE.match(name)
+            if numbered_match:
+                index = int(numbered_match.group(1))
+                if index >= 1:
+                    numbered.append((index, value))
+    else:
+        for name in _EDIT_IMAGE_FIELD_NAMES:
+            canonical.extend(_mapping_getlist(values, name))
+        if values is not None and hasattr(values, "keys"):
+            for raw_name in list(values.keys()):
+                name = str(raw_name)
+                indexed_match = _EDIT_INDEXED_IMAGE_RE.match(name)
+                if indexed_match:
+                    indexed.extend((int(indexed_match.group(1)), item) for item in _mapping_getlist(values, name))
+                    continue
+                numbered_match = _EDIT_NUMBERED_IMAGE_RE.match(name)
+                if numbered_match:
+                    index = int(numbered_match.group(1))
+                    if index >= 1:
+                        numbered.extend((index, item) for item in _mapping_getlist(values, name))
+    indexed.sort(key=lambda item: item[0])
+    numbered.sort(key=lambda item: item[0])
+    if canonical:
+        numbered = [item for item in numbered if item[0] >= 2]
+    return canonical + [value for _, value in indexed] + [value for _, value in numbered]
+
+
+def collect_edit_image_items(*, values: Any, is_form: bool) -> list[Any]:
+    if is_form:
+        items = _collect_named_edit_image_items(values)
+    elif values is not None and hasattr(values, "get") and values.get("images") is not None:
+        raw = values.get("images")
+        items = list(raw) if isinstance(raw, list) else [raw]
+        items.extend(_collect_named_edit_image_items(values))
+    else:
+        items = _collect_named_edit_image_items(values)
+    return [item for item in _dedupe_edit_image_items(items) if not _is_empty_edit_image_item(item)]
+
+
+def extra_edit_image_params(image_rels: list[str]) -> dict[str, Any]:
+    extras: dict[str, Any] = {"inputImgCount": len(image_rels)}
+    for index, rel in enumerate(image_rels[1:], start=2):
+        extras[f"image{index}"] = rel
+    return extras
 
 
 def create_app() -> FastAPI:
@@ -1037,48 +1195,94 @@ def create_app() -> FastAPI:
             }
         return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
+    async def _parse_images_edits_payload(request: Request) -> Dict[str, Any]:
+        content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if content_type == "application/json":
+            try:
+                body = await request.json()
+            except Exception as e:
+                raise _openai_error("Invalid JSON body", http_status=400) from e
+            if not isinstance(body, dict):
+                raise _openai_error("JSON body must be an object", http_status=400)
+            return {
+                "prompt": str(body.get("prompt") or "").strip(),
+                "model": str(body.get("model") or body.get("workflow") or "").strip(),
+                "negative_prompt": str(body.get("negative_prompt") or "").strip(),
+                "response_format": body.get("response_format"),
+                "image_items": collect_edit_image_items(values=body, is_form=False),
+                "raw_values": body,
+            }
+
+        form = await request.form()
+        return {
+            "prompt": str(form.get("prompt") or "").strip(),
+            "model": str(form.get("model") or form.get("workflow") or "").strip(),
+            "negative_prompt": str(form.get("negative_prompt") or "").strip(),
+            "response_format": form.get("response_format"),
+            "image_items": collect_edit_image_items(values=form, is_form=True),
+            "raw_values": form,
+        }
+
+    async def _store_edit_image_item(item: Any, *, filename_hint: str) -> str | None:
+        if hasattr(item, "read"):
+            data = await item.read()
+            if not data:
+                return None
+            hint = getattr(item, "filename", None) or filename_hint
+            return await _store_input_image_bytes(data=data, filename_hint=hint)
+        cleaned = _clean_optional_value(item)
+        if cleaned is None:
+            return None
+        return await _store_input_image_value(str(cleaned), filename_hint=filename_hint)
+
     @app.post("/v1/images/edits")
     async def openai_images_edits(
         request: Request,
-        image: UploadFile = File(...),
-        prompt: str = Form(""),
-        model: str = Form(""),
-        workflow: str = Form(""),
-        negative_prompt: str = Form(""),
-        response_format: str = Form("url"),
-        size: str = Form(""),
-        width: str = Form(""),
-        height: str = Form(""),
-        steps: str = Form(""),
-        cfg_scale: str = Form("", alias="cfg"),
-        seed: str = Form(""),
         authorization: Optional[str] = Header(default=None),
         x_comfyui_async: Optional[str] = Header(default=None),
     ) -> Any:
         _require_auth(cfg, authorization)
-        resolved = await _resolve_public_model(model=(model or "").strip(), kind="img2img", has_image=True)
-        wf = resolved.workflow
-        raw = await image.read()
-        image_rel = await _store_input_image_bytes(data=raw, filename_hint=image.filename)
+        payload = await _parse_images_edits_payload(request)
+        image_items = list(payload.get("image_items") or [])
+        if len(image_items) > _EDIT_IMAGE_MAX:
+            raise _openai_error(f"Too many images: max {_EDIT_IMAGE_MAX}", http_status=400)
 
-        standard_params = _collect_standard_params(
-            {
-                "size": size,
-                "width": width,
-                "height": height,
-                "steps": steps,
-                "cfg": cfg_scale,
-                "seed": seed,
-            }
+        image_rels: list[str] = []
+        for index, item in enumerate(image_items, start=1):
+            stored = await _store_edit_image_item(item, filename_hint=f"image{index}")
+            if stored:
+                image_rels.append(stored)
+        if not image_rels:
+            raise _openai_error("Missing 'image'")
+
+        resolved = await _resolve_public_model(
+            model=str(payload.get("model") or "").strip(),
+            kind="img2img",
+            has_image=True,
         )
+        wf = resolved.workflow
+        raw_values = payload.get("raw_values") or {}
+        standard_params = _collect_standard_params(
+            {key: raw_values.get(key) for key in (*STANDARD_PARAMETER_ORDER, "n") if hasattr(raw_values, "get")}
+        )
+        standard_params.update(
+            await _collect_workflow_request_params(
+                spec=wf.parameter_spec,
+                values=raw_values,
+                store_input_image_bytes=_store_input_image_bytes,
+                store_input_image_value=_store_input_image_value,
+                skip=_EDIT_RESERVED_FIELDS,
+            )
+        )
+        standard_params.update(extra_edit_image_params(image_rels))
         job = await jobs.create_job(
             kind="img2img",
             workflow=wf.name,
             platform="OpenAI",
             requested_model=resolved.record.slug,
-            prompt=(prompt or "").strip(),
-            negative_prompt=(negative_prompt or "").strip(),
-            image=image_rel,
+            prompt=str(payload.get("prompt") or "").strip(),
+            negative_prompt=str(payload.get("negative_prompt") or "").strip(),
+            image=image_rels[0],
             standard_params=standard_params,
         )
         if x_comfyui_async and str(x_comfyui_async).strip() not in {"0", "false", "False"}:
@@ -1092,7 +1296,7 @@ def create_app() -> FastAPI:
             outputs=outputs,
             authorization=authorization,
         )
-        if _normalize_image_response_format(response_format) == "b64_json":
+        if _normalize_image_response_format(payload.get("response_format")) == "b64_json":
             return {
                 "created": utc_now_unix(),
                 "data": _b64_json_data(str(done.get("job_id") or job.job_id), outputs),
