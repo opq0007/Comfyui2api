@@ -116,26 +116,20 @@ export function AppShell({
           <div className="top-actions">
             <span className={live ? "sync-pill online" : "sync-pill"}>
               <span />
-              {live ? "实时同步" : "自动轮询"}
+              {live ? "实时" : "轮询"} · 运行 {running}
             </span>
-            <span className="kbd-pill">⌘ K</span>
             <ThemeToggle theme={theme} onToggle={onThemeToggle} />
-            <button className="icon-text-button" type="button" onClick={onSettings} title="设置">
-              <Settings size={16} />
-              设置
-            </button>
             <button className="danger-button" type="button" onClick={onShutdown} disabled={quitting} title="退出应用">
               <Power size={16} />
-              {quitting ? "正在退出" : "退出"}
+              {quitting ? "退出中" : "退出"}
             </button>
             <button className="primary-button" type="button" onClick={onRefresh} disabled={loading}>
               <RefreshCw size={16} />
-              刷新队列
+              刷新
             </button>
           </div>
         </header>
-        <div className="running-line">当前运行中 {running} 个任务</div>
-        {children}
+        <div className="main-content">{children}</div>
       </main>
     </div>
   );

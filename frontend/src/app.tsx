@@ -281,13 +281,13 @@ export function App(): React.ReactElement {
     >
       {error ? <div className="error-banner">{error}</div> : null}
       {activeView === "overview" ? (
-        <>
+        <div className="view-stack">
           <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} />
           <OverviewPanel stats={stats} total={total} />
-        </>
+        </div>
       ) : null}
       {activeView === "tasks" ? (
-        <>
+        <div className="view-stack">
           <StatusCards counts={counts} total={total} healthyInstances={stats?.healthy_instance_count} />
           <TaskFiltersBar
             filters={filters}
@@ -299,23 +299,33 @@ export function App(): React.ReactElement {
             }}
           />
           <TaskTable items={tasks.items} total={tasks.total} onOpenTask={setSelectedTask} />
-        </>
+        </div>
       ) : null}
       {activeView === "workflows" ? (
-        <WorkflowPanel workflows={workflows} loading={workflowsLoading} onRefresh={() => void refreshWorkflows()} />
+        <div className="view-stack">
+          <WorkflowPanel workflows={workflows} loading={workflowsLoading} onRefresh={() => void refreshWorkflows()} />
+        </div>
       ) : null}
-      {activeView === "outputs" ? <OutputsPanel tasks={tasks.items} onOpenTask={setSelectedTask} /> : null}
+      {activeView === "outputs" ? (
+        <div className="view-stack">
+          <OutputsPanel tasks={tasks.items} onOpenTask={setSelectedTask} />
+        </div>
+      ) : null}
       {activeView === "instances" ? (
-        <InstancesPanel items={instances} loading={backendLoading} onRefresh={() => void refreshBackend()} />
+        <div className="view-stack">
+          <InstancesPanel items={instances} loading={backendLoading} onRefresh={() => void refreshBackend()} />
+        </div>
       ) : null}
       {activeView === "models" ? (
-        <ModelsPanel
-          items={models}
-          instances={instances}
-          workflows={workflows}
-          loading={backendLoading}
-          onRefresh={() => void refreshBackend()}
-        />
+        <div className="view-stack">
+          <ModelsPanel
+            items={models}
+            instances={instances}
+            workflows={workflows}
+            loading={backendLoading}
+            onRefresh={() => void refreshBackend()}
+          />
+        </div>
       ) : null}
       <TaskPreviewDrawer
         task={selectedTask}
