@@ -543,6 +543,35 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(b64_payload["data"][0]["b64_json"]), first)
         self.assertEqual(base64.b64decode(b64_payload["data"][1]["b64_json"]), second)
 
+    def test_images_edits_rejects_missing_prompt(self) -> None:
+        mock_create_job = AsyncMock()
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                data={"model": "test_img2img"},
+                files={"image": ("one.png", b"only-image", "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["message"], "Missing 'prompt'")
+        mock_create_job.assert_not_awaited()
+
+    def test_images_edits_keeps_dash_prompt_on_job(self) -> None:
+        mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-dash"))
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "1"},
+                data={"prompt": " - ", "model": "test_img2img", "negative_prompt": "-"},
+                files={"image": ("one.png", b"only-image", "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["prompt"], "-")
+        self.assertEqual(kwargs["negative_prompt"], "-")
+
     def test_images_edits_rejects_txt2img_workflow_with_clear_400(self) -> None:
         mock_create_job = AsyncMock()
         with patch.object(self.app.state.jobs, "create_job", mock_create_job):

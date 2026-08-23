@@ -1263,6 +1263,9 @@ def create_app() -> FastAPI:
     ) -> Any:
         _require_auth(cfg, authorization)
         payload = await _parse_images_edits_payload(request)
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            raise _openai_error("Missing 'prompt'")
         image_items = list(payload.get("image_items") or [])
         if len(image_items) > _EDIT_IMAGE_MAX:
             raise _openai_error(f"Too many images: max {_EDIT_IMAGE_MAX}", http_status=400)
@@ -1300,7 +1303,7 @@ def create_app() -> FastAPI:
             workflow=wf.name,
             platform="OpenAI",
             requested_model=resolved.record.slug,
-            prompt=str(payload.get("prompt") or "").strip(),
+            prompt=prompt,
             negative_prompt=str(payload.get("negative_prompt") or "").strip(),
             image=image_rels[0],
             standard_params=standard_params,

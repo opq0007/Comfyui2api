@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "kind": "img2img",
+  "prompt_node": "135.text",
+  "image_node": "76.image",
+    "parameters": {
+    "size": {
+      "type": "size",
+      "description": "Output size as WIDTHxHEIGHT. When set, resizeFlag is forced true.",
+      "maps": [
+        {
+          "target": "720.value",
+          "part": "width"
+        },
+        {
+          "target": "721.value",
+          "part": "height"
+        }
+      ]
+    },
+    "width": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output width. Applied only when height is also set (or size is set).",
+      "maps": [
+        {
+          "target": "720.value"
+        }
+      ]
+    },
+    "height": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output height. Applied only when width is also set (or size is set).",
+      "maps": [
+        {
+          "target": "721.value"
+        }
+      ]
+    },
+    "n": {
+      "type": "int",
+      "minimum": 1,
+      "maximum": 16,
+      "description": "Number of images / latent batch size.",
+      "maps": [
+        {
+          "target": "129.batch_size"
+        }
+      ]
+    },
+    "steps": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Sampler steps.",
+      "maps": [
+        {
+          "target": "137.steps"
+        }
+      ]
+    },
+    "cfg": {
+      "type": "float",
+      "description": "CFG / guidance scale.",
+      "maps": [
+        {
+          "target": "138.cfg"
+        }
+      ]
+    },
+    "seed": {
+      "type": "int",
+      "description": "Random seed. Omit or pass -1 to randomize each job.",
+      "maps": [
+        {
+          "target": "125.noise_seed"
+        }
+      ]
+    }
+  }
+}

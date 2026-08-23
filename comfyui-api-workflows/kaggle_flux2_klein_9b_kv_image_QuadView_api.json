@@ -1,0 +1,382 @@
+{
+  "76": {
+    "inputs": {
+      "image": "5ec2a7a0-7e5e-4c5f-815e-457c532dcbf9.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像"
+    }
+  },
+  "94": {
+    "inputs": {
+      "filename_prefix": "Flux2_Klein_9b_kv",
+      "images": [
+        "124",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "122": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "123": {
+    "inputs": {
+      "noise": [
+        "125",
+        0
+      ],
+      "guider": [
+        "138",
+        0
+      ],
+      "sampler": [
+        "122",
+        0
+      ],
+      "sigmas": [
+        "137",
+        0
+      ],
+      "latent_image": [
+        "129",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "124": {
+    "inputs": {
+      "samples": [
+        "123",
+        0
+      ],
+      "vae": [
+        "693",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "125": {
+    "inputs": {
+      "noise_seed": 473195826024724
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "128": {
+    "inputs": {
+      "image": [
+        "717",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
+  "129": {
+    "inputs": {
+      "width": [
+        "128",
+        0
+      ],
+      "height": [
+        "128",
+        1
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "空Latent图像（Flux2）"
+    }
+  },
+  "130": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "76",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "缩放图像（像素）"
+    }
+  },
+  "135": {
+    "inputs": {
+      "text": "Convert the character in the image to a Character Sheet showing a face close-up, front, side and back full body views",
+      "clip": [
+        "695",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "137": {
+    "inputs": {
+      "steps": 4,
+      "width": [
+        "128",
+        0
+      ],
+      "height": [
+        "128",
+        1
+      ]
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2调度器"
+    }
+  },
+  "138": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "139",
+        0
+      ],
+      "positive": [
+        "134:118",
+        0
+      ],
+      "negative": [
+        "134:116",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG引导器"
+    }
+  },
+  "139": {
+    "inputs": {
+      "model": [
+        "698",
+        0
+      ]
+    },
+    "class_type": "FluxKVCache",
+    "_meta": {
+      "title": "Flux KV 缓存"
+    }
+  },
+  "685": {
+    "inputs": {
+      "conditioning": [
+        "135",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "693": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors",
+      "device": "cuda:1"
+    },
+    "class_type": "VAELoaderMultiGPU",
+    "_meta": {
+      "title": "VAELoaderMultiGPU"
+    }
+  },
+  "695": {
+    "inputs": {
+      "clip_name": "qwen3-8b-heretic_int8.safetensors",
+      "type": "flux2",
+      "device": "cuda:1"
+    },
+    "class_type": "CLIPLoaderMultiGPU",
+    "_meta": {
+      "title": "CLIPLoaderMultiGPU"
+    }
+  },
+  "696": {
+    "inputs": {
+      "unet_name": "flux-2-klein-9b-kv-int8-convrot.safetensors",
+      "weight_dtype": "default",
+      "device": "cuda:1"
+    },
+    "class_type": "UNETLoaderMultiGPU",
+    "_meta": {
+      "title": "UNETLoaderMultiGPU"
+    }
+  },
+  "698": {
+    "inputs": {
+      "sage_attention": "sageattn_qk_int8_pv_fp16_cuda",
+      "allow_compile": false,
+      "model": [
+        "699",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "699": {
+    "inputs": {
+      "lora_name": "QuadView_klein9b_v1.safetensors",
+      "strength_model": 1,
+      "model": [
+        "696",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "717": {
+    "inputs": {
+      "boolean": [
+        "718",
+        0
+      ],
+      "on_true": [
+        "723",
+        0
+      ],
+      "on_false": [
+        "130",
+        0
+      ]
+    },
+    "class_type": "easy ifElse",
+    "_meta": {
+      "title": "是否判断"
+    }
+  },
+  "718": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "resizeFlag"
+    }
+  },
+  "720": {
+    "inputs": {
+      "value": 1536
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "width"
+    }
+  },
+  "721": {
+    "inputs": {
+      "value": 1024
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "height"
+    }
+  },
+  "723": {
+    "inputs": {
+      "target_width": [
+        "720",
+        0
+      ],
+      "target_height": [
+        "721",
+        0
+      ],
+      "padding_color": "white",
+      "interpolation": "area",
+      "image": [
+        "76",
+        0
+      ]
+    },
+    "class_type": "ResizeAndPadImage",
+    "_meta": {
+      "title": "调整尺寸并填充图像"
+    }
+  },
+  "134:116": {
+    "inputs": {
+      "conditioning": [
+        "685",
+        0
+      ],
+      "latent": [
+        "134:117",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "参考Latent"
+    }
+  },
+  "134:117": {
+    "inputs": {
+      "pixels": [
+        "717",
+        0
+      ],
+      "vae": [
+        "693",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE编码"
+    }
+  },
+  "134:118": {
+    "inputs": {
+      "conditioning": [
+        "135",
+        0
+      ],
+      "latent": [
+        "134:117",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "参考Latent"
+    }
+  }
+}
