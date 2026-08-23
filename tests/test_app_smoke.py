@@ -678,6 +678,18 @@ class AppSmokeTests(unittest.TestCase):
             collect(values={"image": "one", "image[]": "two", "image2": "two"}, is_form=True),
             ["one", "two"],
         )
+        self.assertEqual(
+            collect(values={"input_reference": "one", "image2": "two"}, is_form=True),
+            ["one", "two"],
+        )
+        self.assertEqual(
+            collect(values={"input_reference": "one", "input_reference2": "two"}, is_form=True),
+            ["one", "two"],
+        )
+        self.assertEqual(
+            collect(values={"input_references": ["one", "two", "three"]}, is_form=False),
+            ["one", "two", "three"],
+        )
 
     def test_images_edits_collects_repeated_image_field(self) -> None:
         mock_create_job = AsyncMock(return_value=SimpleNamespace(job_id="job-edits-repeat"))
@@ -801,7 +813,45 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(kwargs["prompt"], "primary prompt")
         self.assertEqual(kwargs["standard_params"]["duration"], "5")
         self.assertEqual(kwargs["standard_params"]["prompt2"], "secondary prompt")
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 2)
         self.assertTrue(kwargs["standard_params"]["image2"])
+        self.assertTrue(kwargs["image"])
+        self.assertNotEqual(kwargs["image"], kwargs["standard_params"]["image2"])
+
+    def test_videos_create_collects_three_reference_images_and_count(self) -> None:
+        first = "data:image/png;base64," + base64.b64encode(b"frame-one").decode("ascii")
+        second = "data:image/png;base64," + base64.b64encode(b"frame-two").decode("ascii")
+        third = "data:image/png;base64," + base64.b64encode(b"frame-three").decode("ascii")
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(
+                job_id="job-video-three",
+                requested_model=self.dual_input_video_workflow_name,
+                created_at=123,
+            )
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/videos",
+                headers={"Authorization": "Bearer secret-token"},
+                json={
+                    "prompt": "multi frame",
+                    "model": "test_dual_input_video",
+                    "input_reference": first,
+                    "image2": second,
+                    "image3": third,
+                    "seconds": "4",
+                    "size": "1280x720",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["kind"], "img2video")
+        self.assertEqual(kwargs["standard_params"]["inputImgCount"], 3)
+        self.assertEqual(kwargs["standard_params"]["duration"], "4")
+        self.assertEqual(kwargs["standard_params"]["size"], "1280x720")
+        self.assertTrue(kwargs["standard_params"]["image2"])
+        self.assertTrue(kwargs["standard_params"]["image3"])
 
     def test_videos_get_returns_signed_content_url(self) -> None:
         from comfyui2api.jobs import Job, JobOutput

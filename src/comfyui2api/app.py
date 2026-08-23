@@ -258,10 +258,17 @@ async def _collect_workflow_request_params(
     return params
 
 
-_EDIT_IMAGE_FIELD_NAMES = ("image", "image[]", "images")
+_EDIT_IMAGE_FIELD_NAMES = (
+    "image",
+    "image[]",
+    "images",
+    "input_reference",
+    "input_reference[]",
+    "input_references",
+)
 _EDIT_IMAGE_MAX = 16
-_EDIT_INDEXED_IMAGE_RE = re.compile(r"^image\[(\d+)\]$")
-_EDIT_NUMBERED_IMAGE_RE = re.compile(r"^image(\d+)$")
+_EDIT_INDEXED_IMAGE_RE = re.compile(r"^(?:image|input_reference)\[(\d+)\]$")
+_EDIT_NUMBERED_IMAGE_RE = re.compile(r"^(?:image|input_reference)(\d+)$")
 _EDIT_RESERVED_FIELDS = {
     "prompt",
     "model",
@@ -399,12 +406,15 @@ def _collect_named_edit_image_items(values: Any) -> list[Any]:
 def collect_edit_image_items(*, values: Any, is_form: bool) -> list[Any]:
     if is_form:
         items = _collect_named_edit_image_items(values)
-    elif values is not None and hasattr(values, "get") and values.get("images") is not None:
-        raw = values.get("images")
-        items = list(raw) if isinstance(raw, list) else [raw]
-        items.extend(_collect_named_edit_image_items(values))
     else:
-        items = _collect_named_edit_image_items(values)
+        items = []
+        if values is not None and hasattr(values, "get"):
+            for key in ("images", "input_references"):
+                raw = values.get(key)
+                if raw is None:
+                    continue
+                items.extend(list(raw) if isinstance(raw, list) else [raw])
+        items.extend(_collect_named_edit_image_items(values))
     return [item for item in _dedupe_edit_image_items(items) if not _is_empty_edit_image_item(item)]
 
 
@@ -996,7 +1006,8 @@ def create_app() -> FastAPI:
         if str(body.get("workflow") or "").strip():
             raise _openai_error("Use 'model' (external model id); 'workflow' is not a routing key", http_status=400)
         kind = str(body.get("kind") or "").strip() or None
-        has_image = bool(body.get("image") or body.get("image_base64"))
+        image_items = collect_edit_image_items(values=body, is_form=False)
+        has_image = bool(image_items or body.get("image_base64"))
         resolved = await _resolve_public_model(model=requested_model, kind=kind, has_image=has_image)
         wf = resolved.workflow
         workflow = wf.name
@@ -1008,13 +1019,16 @@ def create_app() -> FastAPI:
         negative_prompt_node = str(body.get("negative_prompt_node") or "").strip()
         image_node = str(body.get("image_node") or "").strip()
 
-        image_rel = ""
-        if body.get("image"):
-            image_rel = str(body.get("image") or "").strip()
-        elif body.get("image_base64"):
+        image_rels: list[str] = []
+        for index, item in enumerate(image_items, start=1):
+            stored = await _store_edit_image_item(item, filename_hint=f"image{index}")
+            if stored:
+                image_rels.append(stored)
+        if not image_rels and body.get("image_base64"):
             img_bytes = decode_data_url_base64(str(body.get("image_base64") or ""))
             filename_hint = str(body.get("image_filename") or "") or None
-            image_rel = await _store_input_image_bytes(data=img_bytes, filename_hint=filename_hint)
+            image_rels.append(await _store_input_image_bytes(data=img_bytes, filename_hint=filename_hint))
+        image_rel = image_rels[0] if image_rels else ""
 
         overrides: list[tuple[str, str, Any]] = []
         raw_overrides = body.get("overrides")
@@ -1048,14 +1062,20 @@ def create_app() -> FastAPI:
                     "image",
                     "image_base64",
                     "image_filename",
+                    "input_reference",
+                    "input_reference2",
                     "prompt_node",
                     "negative_prompt_node",
                     "image_node",
                     "overrides",
                     "seconds",
+                    "inputImgCount",
                 },
             )
         )
+        spec_parameters = getattr(getattr(wf, "parameter_spec", None), "parameters", None) or {}
+        if image_rels or "inputImgCount" in spec_parameters:
+            standard_params.update(extra_edit_image_params(image_rels))
 
         job = await jobs.create_job(
             kind=kind,
@@ -1429,10 +1449,20 @@ def create_app() -> FastAPI:
         x_comfyui_async: Optional[str] = Header(default=None),
     ) -> Any:
         _require_auth(cfg, authorization)
+        form = await request.form()
+        image_items = collect_edit_image_items(values=form, is_form=True)
+        if not image_items and image is not None:
+            image_items = [image]
         resolved = await _resolve_public_model(model=(model or "").strip(), kind="img2video", has_image=True)
         wf = resolved.workflow
-        raw = await image.read()
-        image_rel = await _store_input_image_bytes(data=raw, filename_hint=image.filename)
+        image_rels: list[str] = []
+        for index, item in enumerate(image_items, start=1):
+            stored = await _store_edit_image_item(item, filename_hint=f"image{index}")
+            if stored:
+                image_rels.append(stored)
+        if not image_rels:
+            raise _openai_error("Missing 'image'")
+        image_rel = image_rels[0]
 
         standard_params = _collect_standard_params(
             {
@@ -1447,6 +1477,7 @@ def create_app() -> FastAPI:
                 "seed": seed,
             }
         )
+        standard_params.update(extra_edit_image_params(image_rels))
         job = await jobs.create_job(
             kind="img2video",
             workflow=wf.name,
@@ -1516,10 +1547,6 @@ def create_app() -> FastAPI:
             else:
                 metadata = json.dumps(raw_metadata, ensure_ascii=False)
 
-            raw_input_reference = _clean_optional_value(body.get("input_reference"))
-            if raw_input_reference is None:
-                raw_input_reference = _clean_optional_value(body.get("image"))
-
             return {
                 "prompt": str(body.get("prompt") or "").strip(),
                 "model": str(body.get("model") or body.get("workflow") or "").strip(),
@@ -1535,18 +1562,11 @@ def create_app() -> FastAPI:
                 "height": str(body.get("height") or "").strip(),
                 "quality": str(body.get("quality") or "").strip(),
                 "metadata": metadata,
-                "input_reference_upload": None,
-                "input_reference_value": str(raw_input_reference or "").strip(),
+                "image_items": collect_edit_image_items(values=body, is_form=False),
                 "raw_values": body,
             }
 
         form = await request.form()
-        raw_input_reference = form.get("input_reference")
-        input_reference_upload = raw_input_reference if hasattr(raw_input_reference, "read") else None
-        input_reference_value = ""
-        if raw_input_reference is not None and input_reference_upload is None:
-            input_reference_value = str(raw_input_reference or "").strip()
-
         return {
             "prompt": str(form.get("prompt") or "").strip(),
             "model": str(form.get("model") or form.get("workflow") or "").strip(),
@@ -1558,8 +1578,7 @@ def create_app() -> FastAPI:
             "height": str(form.get("height") or "").strip(),
             "quality": str(form.get("quality") or "").strip(),
             "metadata": str(form.get("metadata") or "").strip(),
-            "input_reference_upload": input_reference_upload,
-            "input_reference_value": input_reference_value,
+            "image_items": collect_edit_image_items(values=form, is_form=True),
             "raw_values": form,
         }
 
@@ -1575,17 +1594,14 @@ def create_app() -> FastAPI:
         if not prompt:
             raise _openai_error("Missing 'prompt'")
 
-        kind = "txt2video"
-        image_rel = ""
-        input_reference = payload.get("input_reference_upload")
-        input_reference_value = str(payload.get("input_reference_value") or "").strip()
-        if input_reference is not None:
-            raw = await input_reference.read()
-            image_rel = await _store_input_image_bytes(data=raw, filename_hint=input_reference.filename)
-            kind = "img2video"
-        elif input_reference_value:
-            image_rel = await _store_input_image_value(input_reference_value, filename_hint="input_reference")
-            kind = "img2video"
+        image_items = list(payload.get("image_items") or [])
+        image_rels: list[str] = []
+        for index, item in enumerate(image_items, start=1):
+            stored = await _store_edit_image_item(item, filename_hint=f"image{index}")
+            if stored:
+                image_rels.append(stored)
+        image_rel = image_rels[0] if image_rels else ""
+        kind = "img2video" if image_rel else "txt2video"
 
         resolved = await _workflow_from_model_or_default(
             kind=kind,
@@ -1595,6 +1611,7 @@ def create_app() -> FastAPI:
         wf = resolved.workflow
         workflow = wf.name
         requested_model = resolved.record.slug
+        raw_values = payload.get("raw_values") or {}
         standard_params = _collect_standard_params(
             {
                 "duration": payload.get("seconds"),
@@ -1603,6 +1620,7 @@ def create_app() -> FastAPI:
                 "frames": payload.get("frames"),
                 "width": payload.get("width"),
                 "height": payload.get("height"),
+                "seed": raw_values.get("seed") if hasattr(raw_values, "get") else None,
             }
         )
         standard_params.update(
@@ -1626,10 +1644,15 @@ def create_app() -> FastAPI:
                     "quality",
                     "metadata",
                     "input_reference",
+                    "input_reference2",
                     "image",
+                    "inputImgCount",
                 },
             )
         )
+        spec_parameters = getattr(getattr(wf, "parameter_spec", None), "parameters", None) or {}
+        if image_rels or "inputImgCount" in spec_parameters:
+            standard_params.update(extra_edit_image_params(image_rels))
         job = await jobs.create_job(
             kind=kind,
             workflow=workflow,

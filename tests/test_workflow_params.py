@@ -259,6 +259,55 @@ class WorkflowParameterMappingTests(unittest.TestCase):
         self.assertIn(("718", "value", False), width_only)
         self.assertNotIn(("720", "value", 1024), width_only)
 
+    def test_kaggle_minimax_ti2v_sidecar_maps_duration_size_and_input_count(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "kaggle_minimax_h3_ti2v_api.json"
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="img2video",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "133.prompt")
+        self.assertEqual(spec.image_node, "114.image")
+        self.assertEqual(spec.parameters["inputImgCount"].default, 0)
+
+        text_only = resolve_standard_overrides(workflow_obj=workflow_obj, spec=spec, request_params={})
+        self.assertIn(("186", "value", 0), text_only)
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={
+                "duration": 5,
+                "size": "1280x720",
+                "fps": 24,
+                "seed": 9,
+                "image2": "uploads/last.png",
+                "inputImgCount": 2,
+            },
+        )
+        self.assertIn(("135", "value", 5.0), overrides)
+        self.assertIn(("170", "value", 1280), overrides)
+        self.assertIn(("171", "value", 720), overrides)
+        self.assertIn(("132", "fps", 24.0), overrides)
+        self.assertIn(("131", "noise_seed", 9), overrides)
+        self.assertIn(("191", "image", "uploads/last.png"), overrides)
+        self.assertIn(("186", "value", 2), overrides)
+
+        three_images = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={"inputImgCount": 3, "image2": "uploads/last.png", "image3": "uploads/extra.png"},
+        )
+        self.assertIn(("186", "value", 3), three_images)
+        self.assertIn(("191", "image", "uploads/last.png"), three_images)
+        self.assertFalse(any(item[0] == "image3" or item[2] == "uploads/extra.png" for item in three_images))
+
     def test_apply_img2img_resize_params_forces_flag_from_complete_size(self) -> None:
         self.assertEqual(apply_img2img_resize_params({}), {"resizeFlag": False})
         self.assertEqual(
