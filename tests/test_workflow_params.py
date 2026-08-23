@@ -13,9 +13,13 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from comfyui2api.workflow_params import (
+    WorkflowParameterDefinition,
+    WorkflowParamTarget,
+    apply_img2img_resize_params,
     detect_parameter_candidates,
     generate_parameter_template,
     load_workflow_parameter_spec,
+    normalize_parameter_value,
     resolve_standard_overrides,
 )
 
@@ -223,10 +227,69 @@ class WorkflowParameterMappingTests(unittest.TestCase):
                 ("137", "steps", 8),
                 ("138", "cfg", 1.2),
                 ("125", "noise_seed", 11),
+                ("718", "value", False),
                 ("81", "image", "uploads/second.png"),
                 ("705", "value", 2),
             ],
         )
+
+        sized = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params=apply_img2img_resize_params({"size": "1024x768"}),
+        )
+        self.assertIn(("718", "value", True), sized)
+        self.assertIn(("720", "value", 1024), sized)
+        self.assertIn(("721", "value", 768), sized)
+
+        both_dims = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params=apply_img2img_resize_params({"width": 640, "height": 480}),
+        )
+        self.assertIn(("718", "value", True), both_dims)
+        self.assertIn(("720", "value", 640), both_dims)
+        self.assertIn(("721", "value", 480), both_dims)
+
+        width_only = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params=apply_img2img_resize_params({"width": 1024, "resizeFlag": True}),
+        )
+        self.assertIn(("718", "value", False), width_only)
+        self.assertNotIn(("720", "value", 1024), width_only)
+
+    def test_apply_img2img_resize_params_forces_flag_from_complete_size(self) -> None:
+        self.assertEqual(apply_img2img_resize_params({}), {"resizeFlag": False})
+        self.assertEqual(
+            apply_img2img_resize_params({"size": "1024x768", "resizeFlag": False}),
+            {"size": "1024x768", "resizeFlag": True},
+        )
+        self.assertEqual(
+            apply_img2img_resize_params({"width": 640, "height": 480}),
+            {"width": 640, "height": 480, "resizeFlag": True},
+        )
+        self.assertEqual(
+            apply_img2img_resize_params({"width": 1024, "resizeFlag": True}),
+            {"resizeFlag": False},
+        )
+        self.assertEqual(
+            apply_img2img_resize_params({"size": "  ", "width": "", "resizeFlag": True}),
+            {"size": "  ", "width": "", "resizeFlag": False},
+        )
+
+    def test_bool_parameter_normalizes_common_truthy_values(self) -> None:
+        spec = WorkflowParameterDefinition(
+            name="resizeFlag",
+            type="bool",
+            maps=(WorkflowParamTarget(ref="718.value"),),
+        )
+        self.assertIs(normalize_parameter_value(spec, True), True)
+        self.assertIs(normalize_parameter_value(spec, "false"), False)
+        self.assertIs(normalize_parameter_value(spec, 1), True)
+        self.assertIs(normalize_parameter_value(spec, "0"), False)
+        with self.assertRaises(ValueError):
+            normalize_parameter_value(spec, "yes")
 
     def test_sidecar_mapping_loads_explicit_prompt_and_image_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

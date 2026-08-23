@@ -104,6 +104,47 @@ def _parse_size(value: Any) -> tuple[int, int]:
     return width, height
 
 
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        raise ValueError(f"Invalid bool value: {value!r}")
+    text = _normalize_string(value).lower()
+    if text in {"true", "1"}:
+        return True
+    if text in {"false", "0"}:
+        return False
+    raise ValueError(f"Invalid bool value: {value!r}")
+
+
+def _has_parameter_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def apply_img2img_resize_params(params: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Force resizeFlag from size/width/height; drop incomplete width/height pairs."""
+    out = dict(params or {})
+    has_size = _has_parameter_value(out.get("size"))
+    has_width = _has_parameter_value(out.get("width"))
+    has_height = _has_parameter_value(out.get("height"))
+    if has_size or (has_width and has_height):
+        out["resizeFlag"] = True
+        return out
+    out["resizeFlag"] = False
+    if has_width != has_height:
+        out.pop("width", None)
+        out.pop("height", None)
+    return out
+
+
 def normalize_parameter_value(definition: WorkflowParameterDefinition, raw_value: Any) -> Any:
     ptype = definition.type
     if ptype == "size":
@@ -121,6 +162,8 @@ def normalize_parameter_value(definition: WorkflowParameterDefinition, raw_value
         value = int(raw_value)
     elif ptype == "float":
         value = float(raw_value)
+    elif ptype == "bool":
+        value = _parse_bool(raw_value)
     elif ptype == "image":
         value = _normalize_string(raw_value)
     elif ptype == "string":

@@ -1,9 +1,9 @@
 import type React from "react";
-import { Activity, Files, LayoutDashboard, Power, RefreshCw, Server, Settings, Workflow } from "lucide-react";
+import { Activity, Files, FlaskConical, LayoutDashboard, Power, RefreshCw, Server, Settings, Workflow } from "lucide-react";
 import type { AdminStats, TaskStatus } from "../lib/api";
 import { ThemeToggle, type ThemeMode } from "./theme-toggle";
 
-export type DashboardView = "overview" | "tasks" | "workflows" | "outputs" | "instances" | "models";
+export type DashboardView = "overview" | "tasks" | "playground" | "workflows" | "outputs" | "instances" | "models";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -51,6 +51,7 @@ export function AppShell({
   const navItems: Array<{ view: DashboardView; icon: React.ReactNode; label: string }> = [
     { view: "overview", icon: <LayoutDashboard size={16} />, label: "概览" },
     { view: "tasks", icon: <Activity size={16} />, label: "任务记录" },
+    { view: "playground", icon: <FlaskConical size={16} />, label: "试运行" },
     { view: "workflows", icon: <Workflow size={16} />, label: "工作流" },
     { view: "outputs", icon: <Files size={16} />, label: "输出文件" }
   ];

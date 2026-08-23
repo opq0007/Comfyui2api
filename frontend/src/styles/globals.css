@@ -1086,6 +1086,233 @@ tbody tr:hover {
   font-weight: 800;
 }
 
+.playground-panel {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.playground-panel .panel-header {
+  flex: 0 0 auto;
+  padding: 8px 12px 6px;
+}
+
+.playground-error {
+  flex: 0 0 auto;
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+}
+
+.playground-token {
+  display: grid;
+  gap: 12px;
+  margin: 0 14px 14px;
+  max-width: 420px;
+}
+
+.playground-token label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--surface-soft);
+}
+
+.playground-token input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.playground-split {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(320px, 42%) minmax(0, 1fr);
+  gap: 10px;
+  padding: 0 12px 10px;
+  overflow: hidden;
+}
+
+.playground-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  grid-column: 1 / -1;
+}
+
+.playground-modes button {
+  min-height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.playground-modes button.active,
+.playground-modes button:hover {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+  color: var(--text);
+}
+
+.playground-form {
+  display: grid;
+  align-content: start;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px 8px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.playground-field {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.playground-field.span-all,
+.playground-actions.span-all {
+  grid-column: 1 / -1;
+}
+
+.playground-field.span-2 {
+  grid-column: span 2;
+}
+
+.playground-field span,
+.playground-field small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.playground-field input,
+.playground-field select,
+.playground-field textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.playground-field input,
+.playground-field select {
+  min-height: 28px;
+}
+
+.playground-field textarea {
+  resize: vertical;
+  min-height: 52px;
+  line-height: 1.35;
+}
+
+.playground-image {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+}
+
+.file-drop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 0 8px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+
+.file-drop input {
+  width: 0.1px;
+  height: 0.1px;
+  opacity: 0;
+  overflow: hidden;
+  position: absolute;
+}
+
+.file-drop em {
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playground-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.playground-actions small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.playground-result {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.playground-preview {
+  flex: 1;
+  min-height: 0;
+}
+
+.playground-preview img,
+.playground-preview video {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+
+.playground-progress {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: none;
+}
+
+.playground-trace {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  min-height: 0;
+  flex: 0 1 180px;
+}
+
+.playground-trace pre {
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #0d1220;
+  color: #eef4ff;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .token-page {
   display: grid;
   min-height: 100vh;
@@ -1228,6 +1455,15 @@ tbody tr:hover {
   .status-cards {
     grid-template-columns: repeat(2, minmax(160px, 1fr));
   }
+
+  .playground-split {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .playground-preview {
+    min-height: 240px;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1248,8 +1484,26 @@ tbody tr:hover {
   .detail-grid,
   .runtime-grid,
   .output-grid,
-  .token-page {
+  .token-page,
+  .playground-split,
+  .playground-form,
+  .playground-image,
+  .playground-trace {
     grid-template-columns: 1fr;
+  }
+
+  .playground-split {
+    overflow: auto;
+  }
+
+  .playground-preview {
+    min-height: 220px;
+  }
+
+  .playground-field.span-2,
+  .playground-field.span-all,
+  .playground-actions.span-all {
+    grid-column: 1 / -1;
   }
 
   .filters-bar > * {

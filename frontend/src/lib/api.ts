@@ -1,4 +1,4 @@
-import { getAdminToken } from "./auth";
+import { getAdminToken, getApiToken, clearApiToken } from "./auth";
 
 export type TaskStatus = "pending" | "queued" | "running" | "completed" | "failed";
 
@@ -137,6 +137,60 @@ export class ApiError extends Error {
   }
 }
 
+export class PublicAuthError extends Error {
+  constructor() {
+    super("Unauthorized");
+  }
+}
+
+export type PlaygroundKind = "txt2img" | "img2img" | "txt2video" | "img2video";
+
+export interface PublicModel {
+  id: string;
+  object: string;
+  created: number;
+  owned_by: string;
+  display_name?: string | null;
+  kind: string[];
+  ready: boolean;
+  workflow_available: boolean;
+}
+
+export interface PublicJob {
+  job_id: string;
+  status: TaskStatus;
+  kind?: string;
+  progress_percent?: number;
+  current_node?: string | null;
+  error?: string | null;
+  url?: string | null;
+  outputs?: TaskOutput[];
+}
+
+export interface PublicVideo {
+  id: string;
+  object: string;
+  model?: string;
+  status: string;
+  progress: number;
+  url?: string | null;
+  error?: { message?: string } | null;
+}
+
+export interface PlaygroundRequestTrace {
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+  body: unknown;
+}
+
+export interface PlaygroundSubmitResult {
+  jobId?: string;
+  videoId?: string;
+  response: unknown;
+  request: PlaygroundRequestTrace;
+}
+
 export async function listTasks(filters: TaskFilters, limit = 200, offset = 0): Promise<TaskListResponse> {
   const params = new URLSearchParams();
   params.set("limit", String(Math.min(200, Math.max(1, limit))));
@@ -242,4 +296,209 @@ async function errorMessage(response: Response): Promise<string> {
   } catch {
     return response.statusText;
   }
+}
+
+function publicAuthHeader(): string {
+  const token = getApiToken();
+  return token ? `Bearer ${token}` : "";
+}
+
+async function requestPublicJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  const auth = publicAuthHeader();
+  if (auth) headers.set("Authorization", auth);
+  const response = await fetch(path, { ...init, headers });
+  if (response.status === 401) {
+    clearApiToken();
+    throw new PublicAuthError();
+  }
+  if (!response.ok) {
+    throw new ApiError(await errorMessage(response), response.status);
+  }
+  return (await response.json()) as T;
+}
+
+export async function listPublicModels(): Promise<PublicModel[]> {
+  const payload = await requestPublicJson<{ data?: PublicModel[] }>("/v1/models");
+  return Array.isArray(payload.data) ? payload.data : [];
+}
+
+export async function getPublicJob(jobId: string): Promise<PublicJob> {
+  const payload = await requestPublicJson<{ job: PublicJob }>(`/v1/jobs/${encodeURIComponent(jobId)}`);
+  return payload.job;
+}
+
+export async function getPublicVideo(videoId: string): Promise<PublicVideo> {
+  return requestPublicJson<PublicVideo>(`/v1/videos/${encodeURIComponent(videoId)}`);
+}
+
+function omitEmpty(values: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && !value.trim()) continue;
+    out[key] = typeof value === "string" ? value.trim() : value;
+  }
+  return out;
+}
+
+export interface PlaygroundFields {
+  model: string;
+  prompt: string;
+  negative_prompt?: string;
+  n?: string;
+  size?: string;
+  width?: string;
+  height?: string;
+  steps?: string;
+  cfg?: string;
+  seed?: string;
+  response_format?: string;
+  seconds?: string;
+  duration?: string;
+  fps?: string;
+  frames?: string;
+  quality?: string;
+  metadata?: string;
+  imageFile?: File | null;
+  imageUrl?: string;
+}
+
+function imageStandardFields(fields: PlaygroundFields): Record<string, unknown> {
+  return omitEmpty({
+    model: fields.model,
+    prompt: fields.prompt,
+    negative_prompt: fields.negative_prompt,
+    n: fields.n,
+    size: fields.size,
+    width: fields.width,
+    height: fields.height,
+    steps: fields.steps,
+    cfg: fields.cfg,
+    seed: fields.seed,
+    response_format: fields.response_format
+  });
+}
+
+function videoStandardFields(fields: PlaygroundFields): Record<string, unknown> {
+  return omitEmpty({
+    model: fields.model,
+    prompt: fields.prompt,
+    negative_prompt: fields.negative_prompt,
+    size: fields.size,
+    width: fields.width,
+    height: fields.height,
+    steps: fields.steps,
+    cfg: fields.cfg,
+    seed: fields.seed,
+    seconds: fields.seconds || fields.duration,
+    duration: fields.duration,
+    fps: fields.fps,
+    frames: fields.frames,
+    quality: fields.quality,
+    metadata: fields.metadata
+  });
+}
+
+export async function submitPlayground(kind: PlaygroundKind, fields: PlaygroundFields): Promise<PlaygroundSubmitResult> {
+  if (kind === "txt2img") {
+    const body = imageStandardFields(fields);
+    const request: PlaygroundRequestTrace = {
+      method: "POST",
+      path: "/v1/images/generations",
+      headers: { Authorization: "Bearer ***", "Content-Type": "application/json", "x-comfyui-async": "1" },
+      body
+    };
+    const response = await requestPublicJson<{ job_id?: string; status?: string }>("/v1/images/generations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-comfyui-async": "1" },
+      body: JSON.stringify(body)
+    });
+    return { jobId: response.job_id, response, request };
+  }
+
+  if (kind === "img2img") {
+    const file = fields.imageFile ?? null;
+    const imageUrl = (fields.imageUrl || "").trim();
+    if (file) {
+      const form = new FormData();
+      for (const [key, value] of Object.entries(imageStandardFields(fields))) {
+        form.append(key, String(value));
+      }
+      form.append("image", file, file.name);
+      const request: PlaygroundRequestTrace = {
+        method: "POST",
+        path: "/v1/images/edits",
+        headers: { Authorization: "Bearer ***", "x-comfyui-async": "1" },
+        body: { ...imageStandardFields(fields), image: `<file:${file.name}>` }
+      };
+      const headers = new Headers({ Accept: "application/json", "x-comfyui-async": "1" });
+      const auth = publicAuthHeader();
+      if (auth) headers.set("Authorization", auth);
+      const http = await fetch("/v1/images/edits", { method: "POST", headers, body: form });
+      if (http.status === 401) {
+        clearApiToken();
+        throw new PublicAuthError();
+      }
+      if (!http.ok) throw new ApiError(await errorMessage(http), http.status);
+      const response = (await http.json()) as { job_id?: string };
+      return { jobId: response.job_id, response, request };
+    }
+    const body = { ...imageStandardFields(fields), image: imageUrl };
+    const request: PlaygroundRequestTrace = {
+      method: "POST",
+      path: "/v1/images/edits",
+      headers: { Authorization: "Bearer ***", "Content-Type": "application/json", "x-comfyui-async": "1" },
+      body
+    };
+    const response = await requestPublicJson<{ job_id?: string }>("/v1/images/edits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-comfyui-async": "1" },
+      body: JSON.stringify(body)
+    });
+    return { jobId: response.job_id, response, request };
+  }
+
+  const file = kind === "img2video" ? fields.imageFile ?? null : null;
+  const imageUrl = kind === "img2video" ? (fields.imageUrl || "").trim() : "";
+  if (file) {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(videoStandardFields(fields))) {
+      form.append(key, String(value));
+    }
+    form.append("input_reference", file, file.name);
+    const request: PlaygroundRequestTrace = {
+      method: "POST",
+      path: "/v1/videos",
+      headers: { Authorization: "Bearer ***" },
+      body: { ...videoStandardFields(fields), input_reference: `<file:${file.name}>` }
+    };
+    const headers = new Headers({ Accept: "application/json" });
+    const auth = publicAuthHeader();
+    if (auth) headers.set("Authorization", auth);
+    const http = await fetch("/v1/videos", { method: "POST", headers, body: form });
+    if (http.status === 401) {
+      clearApiToken();
+      throw new PublicAuthError();
+    }
+    if (!http.ok) throw new ApiError(await errorMessage(http), http.status);
+    const response = (await http.json()) as { id?: string };
+    return { videoId: response.id, response, request };
+  }
+
+  const body = videoStandardFields(fields);
+  if (imageUrl) body.input_reference = imageUrl;
+  const request: PlaygroundRequestTrace = {
+    method: "POST",
+    path: "/v1/videos",
+    headers: { Authorization: "Bearer ***", "Content-Type": "application/json" },
+    body
+  };
+  const response = await requestPublicJson<{ id?: string }>("/v1/videos", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return { videoId: response.id, response, request };
 }

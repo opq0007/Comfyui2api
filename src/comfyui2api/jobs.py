@@ -21,7 +21,7 @@ from .config import Config
 from .instance_pool import InstancePool
 from .job_scheduler import JobScheduler
 from .util import guess_media_type, json_dumps, pick_primary_url, sanitize_filename_part, utc_now_iso, utc_now_unix
-from .workflow_params import resolve_standard_overrides
+from .workflow_params import apply_img2img_resize_params, resolve_standard_overrides
 from .workflow_registry import WorkflowDefinition, WorkflowRegistry
 
 
@@ -139,6 +139,9 @@ class JobManager:
         request_json: Optional[dict[str, Any]] = None,
     ) -> Job:
         job_id = uuid.uuid4().hex
+        params = dict(standard_params or {})
+        if str(kind or "").strip().lower() == "img2img":
+            params = apply_img2img_resize_params(params)
         job = Job(
             job_id=job_id,
             created_at_utc=utc_now_iso(),
@@ -161,7 +164,7 @@ class JobManager:
             negative_prompt_node=negative_prompt_node or "",
             image_node=image_node or "",
             overrides=list(overrides or []),
-            standard_params=dict(standard_params or {}),
+            standard_params=params,
             updated_at_utc=utc_now_iso(),
             request_json=dict(request_json) if request_json is not None else self._default_request_summary(
                 kind=kind,
@@ -174,7 +177,7 @@ class JobManager:
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 image=image,
-                standard_params=standard_params or {},
+                standard_params=params,
             ),
         )
         async with self._lock:

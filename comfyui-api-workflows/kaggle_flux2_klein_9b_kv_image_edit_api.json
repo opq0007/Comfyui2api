@@ -85,7 +85,7 @@
   },
   "125": {
     "inputs": {
-      "noise_seed": 140321785217033
+      "noise_seed": 185435132374218
     },
     "class_type": "RandomNoise",
     "_meta": {
@@ -95,7 +95,7 @@
   "128": {
     "inputs": {
       "image": [
-        "130",
+        "717",
         0
       ]
     },
@@ -153,7 +153,7 @@
   },
   "135": {
     "inputs": {
-      "text": "将图片1角色衣服换成粉红色比基尼",
+      "text": "Have the role in Figure 1 put on the clothes from Figure 2",
       "clip": [
         "695",
         0
@@ -334,7 +334,7 @@
   },
   "705": {
     "inputs": {
-      "value": 1
+      "value": 2
     },
     "class_type": "INTConstant",
     "_meta": {
@@ -429,6 +429,79 @@
       "title": "是否判断"
     }
   },
+  "717": {
+    "inputs": {
+      "boolean": [
+        "718",
+        0
+      ],
+      "on_true": [
+        "722",
+        0
+      ],
+      "on_false": [
+        "130",
+        0
+      ]
+    },
+    "class_type": "easy ifElse",
+    "_meta": {
+      "title": "是否判断"
+    }
+  },
+  "718": {
+    "inputs": {
+      "value": false
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "resizeFlag"
+    }
+  },
+  "720": {
+    "inputs": {
+      "value": 720
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "width"
+    }
+  },
+  "721": {
+    "inputs": {
+      "value": 1280
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "height"
+    }
+  },
+  "722": {
+    "inputs": {
+      "width": [
+        "720",
+        0
+      ],
+      "height": [
+        "721",
+        0
+      ],
+      "upscale_method": "nearest-exact",
+      "keep_proportion": "stretch",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "cpu",
+      "image": [
+        "76",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
   "134:116": {
     "inputs": {
       "conditioning": [
@@ -448,7 +521,7 @@
   "134:117": {
     "inputs": {
       "pixels": [
-        "130",
+        "717",
         0
       ],
       "vae": [

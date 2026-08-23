@@ -3,7 +3,51 @@
   "kind": "img2img",
   "prompt_node": "135.text",
   "image_node": "76.image",
-  "parameters": {
+    "parameters": {
+    "size": {
+      "type": "size",
+      "description": "Output size as WIDTHxHEIGHT. When set, resizeFlag is forced true.",
+      "maps": [
+        {
+          "target": "720.value",
+          "part": "width"
+        },
+        {
+          "target": "721.value",
+          "part": "height"
+        }
+      ]
+    },
+    "width": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output width. Applied only when height is also set (or size is set).",
+      "maps": [
+        {
+          "target": "720.value"
+        }
+      ]
+    },
+    "height": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output height. Applied only when width is also set (or size is set).",
+      "maps": [
+        {
+          "target": "721.value"
+        }
+      ]
+    },
+    "resizeFlag": {
+      "type": "bool",
+      "default": false,
+      "description": "Resize output to the requested size. Forced true when size or both width and height are set; otherwise false.",
+      "maps": [
+        {
+          "target": "718.value"
+        }
+      ]
+    },
     "n": {
       "type": "int",
       "minimum": 1,

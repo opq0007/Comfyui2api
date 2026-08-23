@@ -24,6 +24,7 @@ import { connectAdminSocket } from "./lib/websocket";
 import { AppShell } from "./components/app-shell";
 import type { DashboardView } from "./components/app-shell";
 import { InstancesPanel, ModelsPanel } from "./components/backend-panels";
+import { PlaygroundPanel } from "./components/playground-panel";
 import { SettingsPanel } from "./components/settings-panel";
 import { StatusCards } from "./components/status-cards";
 import { TaskFiltersBar } from "./components/task-filters";
@@ -301,6 +302,11 @@ export function App(): React.ReactElement {
           <TaskTable items={tasks.items} total={tasks.total} onOpenTask={setSelectedTask} />
         </div>
       ) : null}
+      {activeView === "playground" ? (
+        <div className="view-stack">
+          <PlaygroundPanel />
+        </div>
+      ) : null}
       {activeView === "workflows" ? (
         <div className="view-stack">
           <WorkflowPanel workflows={workflows} loading={workflowsLoading} onRefresh={() => void refreshWorkflows()} />
@@ -348,6 +354,7 @@ export function App(): React.ReactElement {
 const viewTitles: Record<DashboardView, { title: string; subtitle: string }> = {
   overview: { title: "概览", subtitle: "运行状态、任务总览和本地目录" },
   tasks: { title: "任务记录", subtitle: "队列、状态、耗时、输出预览与失败原因" },
+  playground: { title: "试运行", subtitle: "用公开 OpenAI 兼容接口验证文生图 / 图生图 / 文生视频 / 图生视频" },
   workflows: { title: "工作流", subtitle: "已加载工作流、类型和加载状态" },
   outputs: { title: "输出文件", subtitle: "最近任务产物和预览入口" },
   instances: { title: "实例", subtitle: "登记 ComfyUI 后端、健康状态和并发槽" },
