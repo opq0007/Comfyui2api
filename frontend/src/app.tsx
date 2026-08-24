@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type React from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   AuthError,
   getStats,
@@ -20,6 +21,7 @@ import {
   type WorkflowListResponse
 } from "./lib/api";
 import { clearAdminToken, getAdminToken, setAdminToken } from "./lib/auth";
+import { compactId } from "./lib/format";
 import { connectAdminSocket } from "./lib/websocket";
 import { AppShell } from "./components/app-shell";
 import type { DashboardView } from "./components/app-shell";
@@ -41,6 +43,8 @@ const zeroCounts: Record<TaskStatus, number> = {
   failed: 0
 };
 
+const TASK_PAGE_SIZE = 50;
+
 const emptyList: TaskListResponse = {
   total: 0,
   counts: zeroCounts,
@@ -52,6 +56,7 @@ export function App(): React.ReactElement {
   const [filters, setFilters] = useState<TaskFilters>({});
   const [appliedFilters, setAppliedFilters] = useState<TaskFilters>({});
   const [tasks, setTasks] = useState<TaskListResponse>(emptyList);
+  const [taskPage, setTaskPage] = useState(0);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -84,7 +89,10 @@ export function App(): React.ReactElement {
     setLoading(true);
     setError("");
     try {
-      const [taskList, nextStats] = await Promise.all([listTasks(apiFilters), getStats()]);
+      const [taskList, nextStats] = await Promise.all([
+        listTasks(apiFilters, TASK_PAGE_SIZE, taskPage * TASK_PAGE_SIZE),
+        getStats()
+      ]);
       setTasks(taskList);
       setStats(nextStats);
       setAuthNeeded(false);
@@ -98,7 +106,7 @@ export function App(): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  }, [apiFilters]);
+  }, [apiFilters, taskPage]);
 
   useEffect(() => {
     if (authNeeded) return;
@@ -132,7 +140,13 @@ export function App(): React.ReactElement {
 
     function handleWsEvent(event: { type: string; data?: TaskListResponse; job?: TaskRecord }): void {
       if (event.type === "snapshot" && event.data) {
-        setTasks(event.data);
+        // Keep current page items; only refresh counts/total so pagination is
+        // not clobbered by the socket's initial 50-item snapshot.
+        setTasks((current) => ({
+          total: event.data?.total ?? current.total,
+          counts: event.data?.counts ?? current.counts,
+          items: current.items
+        }));
       }
       if (event.type === "task_updated" && event.job) {
         setTasks((current) => mergeTask(current, event.job as TaskRecord));
@@ -293,13 +307,24 @@ export function App(): React.ReactElement {
           <TaskFiltersBar
             filters={filters}
             onChange={setFilters}
-            onApply={() => setAppliedFilters(filters)}
+            onApply={() => {
+              setTaskPage(0);
+              setAppliedFilters(filters);
+            }}
             onReset={() => {
               setFilters({});
+              setTaskPage(0);
               setAppliedFilters({});
             }}
           />
-          <TaskTable items={tasks.items} total={tasks.total} onOpenTask={setSelectedTask} />
+          <TaskTable
+            items={tasks.items}
+            total={tasks.total}
+            pageIndex={taskPage}
+            pageSize={TASK_PAGE_SIZE}
+            onPageChange={setTaskPage}
+            onOpenTask={setSelectedTask}
+          />
         </div>
       ) : null}
       {activeView === "playground" ? (
@@ -314,7 +339,7 @@ export function App(): React.ReactElement {
       ) : null}
       {activeView === "outputs" ? (
         <div className="view-stack">
-          <OutputsPanel tasks={tasks.items} onOpenTask={setSelectedTask} />
+          <OutputsPanel onOpenTask={setSelectedTask} />
         </div>
       ) : null}
       {activeView === "instances" ? (
@@ -418,34 +443,119 @@ function WorkflowPanel({
   );
 }
 
-function OutputsPanel({
-  tasks,
-  onOpenTask
-}: {
-  tasks: TaskRecord[];
-  onOpenTask: (task: TaskRecord) => void;
-}): React.ReactElement {
-  const outputTasks = tasks.filter((task) => task.output_count > 0 || task.url);
+function OutputsPanel({ onOpenTask }: { onOpenTask: (task: TaskRecord) => void }): React.ReactElement {
+  const [outputs, setOutputs] = useState<TaskRecord[]>([]);
+  const [outputTotal, setOutputTotal] = useState(0);
+  const [outputPage, setOutputPage] = useState(0);
+  const [outputLoading, setOutputLoading] = useState(false);
+  const [outputError, setOutputError] = useState("");
+  const pageSize = 30;
+
+  const loadOutputs = useCallback(async (page: number) => {
+    if (!getAdminToken()) {
+      setOutputError("未授权");
+      return;
+    }
+    setOutputLoading(true);
+    setOutputError("");
+    try {
+      // Backend has no output_count filter; fetch a page and keep only tasks
+      // that actually produced files, then paginate that filtered window.
+      const limit = 200;
+      const offset = Math.floor(page / 10) * limit;
+      const payload = await listTasks({}, limit, offset);
+      const withOutputs = payload.items.filter((task) => task.output_count > 0 || Boolean(task.url));
+      setOutputTotal(payload.total);
+      setOutputs(withOutputs);
+    } catch (err) {
+      if (err instanceof AuthError) {
+        clearAdminToken();
+        setOutputError("凭证已失效，请重新登录");
+      } else {
+        setOutputError(err instanceof Error ? err.message : "输出加载失败");
+      }
+    } finally {
+      setOutputLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadOutputs(0);
+  }, [loadOutputs]);
+
   return (
     <section className="view-panel">
       <div className="panel-header">
         <div>
           <h2>最近输出</h2>
-          <p>显示当前已载入任务中的产物</p>
+          <p>有产物的任务预览与分页浏览</p>
         </div>
       </div>
+      {outputError ? <div className="error-banner">{outputError}</div> : null}
       <div className="output-grid">
-        {outputTasks.map((task) => (
-          <button className="output-card" type="button" onClick={() => onOpenTask(task)} key={task.job_id}>
-            <strong>{task.workflow}</strong>
-            <span>{task.job_id}</span>
-            <small>{task.output_count} 个文件</small>
+        {outputLoading ? <div className="empty-state compact">正在加载输出…</div> : null}
+        {!outputLoading &&
+          outputs.slice(0, 20).map((task) => (
+            <OutputCard task={task} key={task.job_id} onOpen={() => onOpenTask(task)} />
+          ))}
+        {!outputLoading && outputs.length === 0 ? <div className="empty-state compact">没有可显示的输出文件</div> : null}
+      </div>
+      <div className="pagination">
+        <span>
+          显示 {outputs.length} / 共 {outputTotal} 条带产物记录
+        </span>
+        <div>
+          <button
+            type="button"
+            disabled={outputPage === 0}
+            onClick={() => {
+              const next = Math.max(0, outputPage - 1);
+              setOutputPage(next);
+              void loadOutputs(next);
+            }}
+            title="上一页"
+          >
+            <ChevronLeft size={16} />
           </button>
-        ))}
-        {outputTasks.length === 0 ? <div className="empty-state compact">没有可显示的输出文件</div> : null}
+          <strong>{outputPage + 1}</strong>
+          <button
+            type="button"
+            disabled={outputs.length === 0}
+            onClick={() => {
+              const next = outputPage + 1;
+              setOutputPage(next);
+              void loadOutputs(next);
+            }}
+            title="下一页"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
       </div>
     </section>
   );
+}
+
+function OutputCard({ task, onOpen }: { task: TaskRecord; onOpen: () => void }): React.ReactElement {
+  const preview = task.outputs?.find((output) => output.media_type?.startsWith("image/") || output.media_type?.startsWith("video/"));
+  return (
+    <button className="output-card" type="button" onClick={onOpen} title={task.job_id}>
+      {preview ? <OutputThumb media={preview} /> : null}
+      <strong>{task.workflow}</strong>
+      <span>{compactId(task.job_id, 16)}</span>
+      <small>{task.output_count} 个文件</small>
+    </button>
+  );
+}
+
+function OutputThumb({ media }: { media: { url: string; media_type?: string | null } }): React.ReactElement | null {
+  if (media.media_type?.startsWith("video/")) {
+    return <video src={media.url} muted playsInline preload="metadata" />;
+  }
+  if (media.media_type?.startsWith("image/")) {
+    return <img src={media.url} alt="output" />;
+  }
+  return null;
 }
 
 function RuntimeTile({ label, value }: { label: string; value?: string }): React.ReactElement {
@@ -466,9 +576,18 @@ function toApiFilters(filters: TaskFilters): TaskFilters {
 }
 
 function mergeTask(current: TaskListResponse, task: TaskRecord): TaskListResponse {
-  const existing = current.items.filter((item) => item.job_id !== task.job_id);
+  // Replace in-place if the job is already on this page; otherwise the item
+  // belongs on another page (its screen position is unknown), so only update
+  // totals. Avoids injecting off-page rows into the current page mid-stream.
+  const exists = current.items.some((item) => item.job_id === task.job_id);
+  if (!exists) {
+    return {
+      ...current,
+      total: Math.max(current.total, 1)
+    };
+  }
   return {
     ...current,
-    items: [task, ...existing].slice(0, 200)
+    items: current.items.map((item) => (item.job_id === task.job_id ? task : item))
   };
 }

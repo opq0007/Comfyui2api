@@ -3,7 +3,6 @@ import { useMemo, useState } from "react";
 import {
   flexRender,
   getCoreRowModel,
-  getPaginationRowModel,
   getSortedRowModel,
   useReactTable,
   type ColumnDef,
@@ -19,10 +18,13 @@ import { kindLabels, StatusBadge } from "./status-badge";
 interface TaskTableProps {
   items: TaskRecord[];
   total: number;
+  pageIndex: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
   onOpenTask: (task: TaskRecord) => void;
 }
 
-export function TaskTable({ items, total, onOpenTask }: TaskTableProps): React.ReactElement {
+export function TaskTable({ items, total, pageIndex, pageSize, onPageChange, onOpenTask }: TaskTableProps): React.ReactElement {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({
     finished_at_utc: false,
@@ -116,17 +118,16 @@ export function TaskTable({ items, total, onOpenTask }: TaskTableProps): React.R
       sorting,
       columnVisibility
     },
-    initialState: {
-      pagination: { pageIndex: 0, pageSize: 50 }
-    },
     onSortingChange: setSorting,
     onColumnVisibilityChange: setColumnVisibility,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    getPaginationRowModel: getPaginationRowModel()
+    getSortedRowModel: getSortedRowModel()
   });
 
   const rows = table.getRowModel().rows;
+  const pageCount = total > 0 ? Math.ceil(total / pageSize) : 0;
+  const canPrev = pageIndex > 0;
+  const canNext = pageIndex < pageCount - 1;
 
   return (
     <section className="table-panel">
@@ -192,14 +193,14 @@ export function TaskTable({ items, total, onOpenTask }: TaskTableProps): React.R
       </div>
       <div className="pagination">
         <span>
-          显示 {rows.length} / 共 {total} 条记录
+          显示 {items.length} / 共 {total} 条记录
         </span>
         <div>
-          <button type="button" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} title="上一页">
+          <button type="button" onClick={() => onPageChange(pageIndex - 1)} disabled={!canPrev} title="上一页">
             <ChevronLeft size={16} />
           </button>
-          <strong>{table.getState().pagination.pageIndex + 1}</strong>
-          <button type="button" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} title="下一页">
+          <strong>{pageCount > 0 ? pageIndex + 1 : 1}</strong>
+          <button type="button" onClick={() => onPageChange(pageIndex + 1)} disabled={!canNext} title="下一页">
             <ChevronRight size={16} />
           </button>
         </div>
