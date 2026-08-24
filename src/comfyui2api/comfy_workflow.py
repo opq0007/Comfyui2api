@@ -10,6 +10,13 @@ class WorkflowFormatError(ValueError):
     pass
 
 
+KEEP_WORKFLOW_PROMPT_SENTINEL = "-"
+
+
+def is_keep_workflow_prompt(value: Any) -> bool:
+    return str(value or "").strip() == KEEP_WORKFLOW_PROMPT_SENTINEL
+
+
 def _input_schema_map(schema: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     inputs = schema.get("input")
@@ -409,10 +416,12 @@ def prepare_prompt(
 
     prompt_overrides: List[Tuple[str, str, Any]] = []
     selected_targets: Dict[str, List[Tuple[str, str]]] = {"positive": [], "negative": []}
+    apply_positive = bool(positive_prompt) and not is_keep_workflow_prompt(positive_prompt)
+    apply_negative = bool(negative_prompt) and not is_keep_workflow_prompt(negative_prompt)
     need_auto = False
-    if positive_prompt and not (positive_prompt_node or "").strip():
+    if apply_positive and not (positive_prompt_node or "").strip():
         need_auto = True
-    if negative_prompt and not (negative_prompt_node or "").strip():
+    if apply_negative and not (negative_prompt_node or "").strip():
         need_auto = True
     if image and not (image_node or "").strip():
         need_auto = True
@@ -424,7 +433,7 @@ def prepare_prompt(
         pos_candidates, neg_candidates = find_text_prompt_targets(prompt)
         img_candidates = find_load_image_targets(prompt)
 
-    if positive_prompt:
+    if apply_positive:
         node_ref = (positive_prompt_node or "").strip()
         if node_ref:
             node_id, input_key = parse_node_input_ref(node_ref, default_input="text")
@@ -433,7 +442,7 @@ def prepare_prompt(
         prompt_overrides.append((node_id, input_key, str(positive_prompt)))
         selected_targets["positive"].append((node_id, input_key))
 
-    if negative_prompt:
+    if apply_negative:
         node_ref = (negative_prompt_node or "").strip()
         if node_ref:
             node_id, input_key = parse_node_input_ref(node_ref, default_input="text")

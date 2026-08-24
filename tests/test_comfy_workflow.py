@@ -138,6 +138,73 @@ class ComfyWorkflowSanitizationTests(unittest.TestCase):
             },
         )
 
+    def test_prepare_prompt_keeps_workflow_defaults_for_dash_sentinel(self) -> None:
+        workflow = {
+            "prompt": {
+                "1": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": "preset positive"},
+                    "_meta": {"title": "Positive Prompt"},
+                },
+                "2": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": "preset negative"},
+                    "_meta": {"title": "Negative Prompt"},
+                },
+            }
+        }
+
+        prompt, extra_data, applied, trace = prepare_prompt(
+            workflow_obj=workflow,
+            positive_prompt=" - ",
+            negative_prompt="-",
+            positive_prompt_node="1.text",
+            negative_prompt_node="2.text",
+            image=None,
+            image_node=None,
+            overrides=[],
+        )
+
+        self.assertIsNone(extra_data)
+        self.assertEqual(applied, [])
+        self.assertEqual(prompt["1"]["inputs"]["text"], "preset positive")
+        self.assertEqual(prompt["2"]["inputs"]["text"], "preset negative")
+        self.assertEqual(trace, {})
+
+    def test_prepare_prompt_writes_non_sentinel_dash_like_text(self) -> None:
+        workflow = {
+            "prompt": {
+                "1": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": "preset positive"},
+                    "_meta": {"title": "Positive Prompt"},
+                },
+                "2": {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": "preset negative"},
+                    "_meta": {"title": "Negative Prompt"},
+                },
+            }
+        }
+
+        prompt, extra_data, applied, trace = prepare_prompt(
+            workflow_obj=workflow,
+            positive_prompt="---",
+            negative_prompt=" - extra",
+            positive_prompt_node=None,
+            negative_prompt_node=None,
+            image=None,
+            image_node=None,
+            overrides=[],
+        )
+
+        self.assertIsNone(extra_data)
+        self.assertEqual(applied, [("1", "text", "---"), ("2", "text", " - extra")])
+        self.assertEqual(prompt["1"]["inputs"]["text"], "---")
+        self.assertEqual(prompt["2"]["inputs"]["text"], " - extra")
+        self.assertEqual(trace["positive"][0]["value"], "---")
+        self.assertEqual(trace["negative"][0]["value"], " - extra")
+
     def test_prunes_orphan_output_nodes_missing_required_inputs(self) -> None:
         prompt = {
             "10": {

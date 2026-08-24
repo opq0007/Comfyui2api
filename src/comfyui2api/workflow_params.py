@@ -12,6 +12,7 @@ STANDARD_PARAMETER_ORDER = (
     "size",
     "width",
     "height",
+    "n",
     "steps",
     "cfg",
     "seed",
@@ -103,6 +104,47 @@ def _parse_size(value: Any) -> tuple[int, int]:
     return width, height
 
 
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        raise ValueError(f"Invalid bool value: {value!r}")
+    text = _normalize_string(value).lower()
+    if text in {"true", "1"}:
+        return True
+    if text in {"false", "0"}:
+        return False
+    raise ValueError(f"Invalid bool value: {value!r}")
+
+
+def _has_parameter_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def apply_img2img_resize_params(params: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Force resizeFlag from size/width/height; drop incomplete width/height pairs."""
+    out = dict(params or {})
+    has_size = _has_parameter_value(out.get("size"))
+    has_width = _has_parameter_value(out.get("width"))
+    has_height = _has_parameter_value(out.get("height"))
+    if has_size or (has_width and has_height):
+        out["resizeFlag"] = True
+        return out
+    out["resizeFlag"] = False
+    if has_width != has_height:
+        out.pop("width", None)
+        out.pop("height", None)
+    return out
+
+
 def normalize_parameter_value(definition: WorkflowParameterDefinition, raw_value: Any) -> Any:
     ptype = definition.type
     if ptype == "size":
@@ -120,6 +162,8 @@ def normalize_parameter_value(definition: WorkflowParameterDefinition, raw_value
         value = int(raw_value)
     elif ptype == "float":
         value = float(raw_value)
+    elif ptype == "bool":
+        value = _parse_bool(raw_value)
     elif ptype == "image":
         value = _normalize_string(raw_value)
     elif ptype == "string":
@@ -473,6 +517,7 @@ def _score_input_candidate(parameter_name: str, *, input_key: str, class_type: s
     exact_keys = {
         "width": {"width"},
         "height": {"height"},
+        "n": {"batchsize", "n"},
         "steps": {"steps"},
         "cfg": {"cfg"},
         "seed": {"seed"},
@@ -483,6 +528,7 @@ def _score_input_candidate(parameter_name: str, *, input_key: str, class_type: s
     aliases = {
         "width": {"imagewidth", "latentwidth"},
         "height": {"imageheight", "latentheight"},
+        "n": {"batch", "numimages", "imagecount"},
         "steps": {"numsteps"},
         "cfg": {"cfgscale", "guidance", "guidancescale"},
         "seed": {"noiseseed", "randomseed"},
@@ -494,6 +540,7 @@ def _score_input_candidate(parameter_name: str, *, input_key: str, class_type: s
         "size": ("latent", "image", "size"),
         "width": ("latent", "image", "size"),
         "height": ("latent", "image", "size"),
+        "n": ("latent", "batch", "empty"),
         "steps": ("sampler", "ksampler"),
         "cfg": ("sampler", "guidance", "ksampler"),
         "seed": ("sampler", "noise", "ksampler"),
@@ -645,6 +692,18 @@ def detect_parameter_candidates(workflow_obj: Any) -> dict[str, list[dict[str, A
                     node=node,
                     maps=[_candidate_map_dict(node_id, node, input_key)],
                 )
+            elif _matches({"batchsize", "batch", "n", "numimages", "imagecount"}):
+                score = _score_input_candidate("n", input_key=input_key, class_type=cls, title=title)
+                _append_candidate(
+                    buckets,
+                    seen,
+                    parameter_name="n",
+                    score=score,
+                    reason=f"matched numeric input '{input_key}'",
+                    node_id=node_id,
+                    node=node,
+                    maps=[_candidate_map_dict(node_id, node, input_key)],
+                )
 
         if node_width and node_height:
             width_score, width_key = sorted(node_width, key=lambda item: item[0], reverse=True)[0]
@@ -720,9 +779,10 @@ def _parameter_description(name: str) -> str:
         "size": "Image or latent size as WIDTHxHEIGHT.",
         "width": "Output width.",
         "height": "Output height.",
+        "n": "Number of images / latent batch size.",
         "steps": "Sampler steps.",
         "cfg": "Guidance or CFG scale.",
-        "seed": "Random seed.",
+        "seed": "Random seed. Omit or pass -1 to randomize each job.",
         "fps": "Video frames per second.",
         "duration": "Video duration in seconds.",
         "frames": "Video frame count.",

@@ -24,19 +24,26 @@ interface TaskTableProps {
 
 export function TaskTable({ items, total, onOpenTask }: TaskTableProps): React.ReactElement {
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({
+    finished_at_utc: false,
+    platform: false
+  });
 
   const columns = useMemo<ColumnDef<TaskRecord>[]>(
     () => [
       {
         accessorKey: "created_at_utc",
         header: "提交时间",
-        cell: ({ row }) => <span className="two-line">{formatDateTime(row.original.created_at_utc)}</span>
+        cell: ({ row }) => (
+          <span className="nowrap" title={row.original.created_at_utc}>
+            {formatDateTime(row.original.created_at_utc, true)}
+          </span>
+        )
       },
       {
         accessorKey: "finished_at_utc",
         header: "结束时间",
-        cell: ({ row }) => <span>{formatDateTime(row.original.finished_at_utc)}</span>
+        cell: ({ row }) => <span title={row.original.finished_at_utc ?? ""}>{formatDateTime(row.original.finished_at_utc, true)}</span>
       },
       {
         accessorKey: "duration_s",
@@ -66,7 +73,7 @@ export function TaskTable({ items, total, onOpenTask }: TaskTableProps): React.R
             }}
             title={row.original.job_id}
           >
-            <span>{compactId(row.original.job_id, 26)}</span>
+            <span>{compactId(row.original.job_id, 14)}</span>
             <Copy size={14} />
           </button>
         )

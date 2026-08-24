@@ -4,6 +4,7 @@ param(
     [string]$Python,
     [string]$EnvFile,
     [switch]$SkipComfyCheck,
+    [switch]$SkipFrontendBuild,
     [switch]$CheckOnly
 )
 
@@ -87,6 +88,46 @@ function Import-EnvFile([string]$Path) {
         if ($value.Length -gt 0) {
             [Environment]::SetEnvironmentVariable($name, $value, "Process")
         }
+    }
+}
+
+function Test-WebUiReady {
+    $uiDist = Join-Path $projectRoot "src\comfyui2api\webui_dist"
+    $index = Join-Path $uiDist "index.html"
+    $assets = Join-Path $uiDist "assets"
+    if (-not (Test-Path -LiteralPath $index)) {
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $assets)) {
+        return $false
+    }
+    $files = @(Get-ChildItem -LiteralPath $assets -File -ErrorAction SilentlyContinue)
+    return $files.Count -gt 0
+}
+
+function Ensure-WebUiDist {
+    if ($SkipFrontendBuild) {
+        if (-not (Test-WebUiReady)) {
+            Write-Warning "Web UI assets are missing. /ui will be empty until you run scripts\build-frontend.ps1"
+        }
+        return
+    }
+    if (Test-WebUiReady) {
+        Write-Info "Web UI assets found."
+        return
+    }
+
+    $buildScript = Join-Path $projectRoot "scripts\build-frontend.ps1"
+    if (-not (Test-Path -LiteralPath $buildScript)) {
+        throw "Web UI has not been built and $buildScript is missing."
+    }
+    Write-Info "Web UI assets missing; building frontend into src\comfyui2api\webui_dist ..."
+    & $buildScript
+    if ($LASTEXITCODE) {
+        throw "Frontend build failed with exit code $LASTEXITCODE"
+    }
+    if (-not (Test-WebUiReady)) {
+        throw "Frontend build finished but src\comfyui2api\webui_dist still has no assets."
     }
 }
 
@@ -245,6 +286,7 @@ if ($selectedPort -ne $resolvedPort) {
 $resolvedPort = [Environment]::GetEnvironmentVariable("API_PORT", "Process")
 
 Ensure-UvEnvironment -UvExe $uvExe
+Ensure-WebUiDist
 $pythonExe = (Resolve-Path $venvPython).Path
 
 Write-Info "Project root: $projectRoot"

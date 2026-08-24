@@ -49,7 +49,8 @@ def create_admin_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_admin_auth(request, authorization)
-        return await _store(request).list_tasks(
+        cfg = _cfg(request)
+        payload = await _store(request).list_tasks(
             start=start,
             end=end,
             q=q,
@@ -59,6 +60,19 @@ def create_admin_router() -> APIRouter:
             limit=limit,
             offset=offset,
         )
+        items = []
+        for raw in payload.get("items") or []:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            job_id = str(item.get("job_id") or "")
+            raw_primary = str(item.get("url") or "")
+            primary_name = Path(raw_primary).name if raw_primary else ""
+            if primary_name and job_id:
+                item["url"] = _authorized_url(request, cfg, f"/runs/{job_id}/{primary_name}")
+            items.append(item)
+        payload["items"] = items
+        return payload
 
     @router.get("/tasks/{job_id}")
     async def get_task(

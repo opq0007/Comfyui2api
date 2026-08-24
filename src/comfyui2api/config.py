@@ -134,7 +134,7 @@ def load_config() -> Config:
         max_image_bytes=_env_int("MAX_IMAGE_BYTES", 20_000_000),
         timeout_s=_env_int("TIMEOUT_S", 3600),
         poll_interval_s=_env_float("POLL_INTERVAL_S", 0.5),
-        http_timeout_s=_env_int("HTTP_TIMEOUT_S", 30),
+        http_timeout_s=_env_int("HTTP_TIMEOUT_S", 600),
         enable_workflow_watch=_env_bool("ENABLE_WORKFLOW_WATCH", True),
         job_retention_seconds=_job_retention_seconds(),
         max_jobs_in_memory=max(0, _env_int("MAX_JOBS_IN_MEMORY", 1000)),

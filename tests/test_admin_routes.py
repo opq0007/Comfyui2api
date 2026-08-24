@@ -35,7 +35,11 @@ class AdminRoutesTests(unittest.TestCase):
         data.mkdir(parents=True, exist_ok=True)
         if ui_built:
             (ui_dist / "assets").mkdir(parents=True, exist_ok=True)
-            (ui_dist / "index.html").write_text("<html><body>dashboard</body></html>", encoding="utf-8")
+            (ui_dist / "index.html").write_text(
+                '<html><body>dashboard<script type="module" src="/ui/assets/app.js"></script></body></html>',
+                encoding="utf-8",
+            )
+            (ui_dist / "assets" / "app.js").write_text("window.__comfyui2api = true;\n", encoding="utf-8")
 
         env = {
             "ADMIN_TOKEN": "admin-token",
@@ -69,6 +73,7 @@ class AdminRoutesTests(unittest.TestCase):
                     platform="OpenAI",
                     prompt_id="prompt_admin",
                     progress_percent=100,
+                    url="/runs/task_admin/out.png",
                     outputs=[
                         JobOutput(
                             filename="out.png",
@@ -93,6 +98,8 @@ class AdminRoutesTests(unittest.TestCase):
                 payload = response.json()
                 self.assertEqual(payload["total"], 1)
                 self.assertEqual(payload["items"][0]["job_id"], "task_admin")
+                self.assertIn("/runs/task_admin/out.png", payload["items"][0]["url"])
+                self.assertIn("sig=", payload["items"][0]["url"])
 
                 detail = client.get("/v1/admin/tasks/task_admin", headers={"Authorization": "Bearer admin-token"})
                 self.assertEqual(detail.status_code, 200)
@@ -422,6 +429,36 @@ class AdminRoutesTests(unittest.TestCase):
                 response = client.get("/ui")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("dashboard", response.text)
+                self.assertIn("text/html", response.headers.get("content-type", "").lower())
+
+                asset = client.get("/ui/assets/app.js")
+                self.assertEqual(asset.status_code, 200)
+                self.assertIn("window.__comfyui2api", asset.text)
+                content_type = asset.headers.get("content-type", "").lower()
+                self.assertTrue(
+                    content_type.startswith("text/javascript") or content_type.startswith("application/javascript"),
+                    msg=f"ES modules require a JavaScript MIME type, got {content_type!r}",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            import mimetypes
+
+            from comfyui2api.webui import ensure_web_asset_mimetypes
+
+            mimetypes.add_type("text/plain", ".js")
+            self.assertEqual(mimetypes.guess_type("asset.js")[0], "text/plain")
+            ensure_web_asset_mimetypes()
+            self.assertEqual(mimetypes.guess_type("asset.js")[0], "text/javascript")
+
+            app = self._app_with_env(Path(tmp), ui_built=True)
+            with TestClient(app) as client:
+                asset = client.get("/ui/assets/app.js")
+                self.assertEqual(asset.status_code, 200)
+                content_type = asset.headers.get("content-type", "").lower()
+                self.assertTrue(
+                    content_type.startswith("text/javascript") or content_type.startswith("application/javascript"),
+                    msg=f"Windows text/plain override must not leak to /ui/assets, got {content_type!r}",
+                )
 
         with tempfile.TemporaryDirectory() as tmp:
             app = self._app_with_env(Path(tmp), ui_built=False)

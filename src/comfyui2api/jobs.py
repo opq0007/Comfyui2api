@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import random
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .backend_store import BackendStore
-from .comfy_client import ComfyApiError, ComfyUIClient
+from .comfy_client import ComfyApiError, ComfyUIClient, history_entry_error, history_entry_is_complete
 from .comfy_workflow import (
     iter_file_outputs,
     normalize_prompt_enum_inputs,
@@ -20,7 +21,7 @@ from .config import Config
 from .instance_pool import InstancePool
 from .job_scheduler import JobScheduler
 from .util import guess_media_type, json_dumps, pick_primary_url, sanitize_filename_part, utc_now_iso, utc_now_unix
-from .workflow_params import resolve_standard_overrides
+from .workflow_params import apply_img2img_resize_params, resolve_standard_overrides
 from .workflow_registry import WorkflowDefinition, WorkflowRegistry
 
 
@@ -138,6 +139,9 @@ class JobManager:
         request_json: Optional[dict[str, Any]] = None,
     ) -> Job:
         job_id = uuid.uuid4().hex
+        params = dict(standard_params or {})
+        if str(kind or "").strip().lower() == "img2img":
+            params = apply_img2img_resize_params(params)
         job = Job(
             job_id=job_id,
             created_at_utc=utc_now_iso(),
@@ -160,7 +164,7 @@ class JobManager:
             negative_prompt_node=negative_prompt_node or "",
             image_node=image_node or "",
             overrides=list(overrides or []),
-            standard_params=dict(standard_params or {}),
+            standard_params=params,
             updated_at_utc=utc_now_iso(),
             request_json=dict(request_json) if request_json is not None else self._default_request_summary(
                 kind=kind,
@@ -173,7 +177,7 @@ class JobManager:
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 image=image,
-                standard_params=standard_params or {},
+                standard_params=params,
             ),
         )
         async with self._lock:
@@ -184,8 +188,19 @@ class JobManager:
         return job
 
     async def get_job(self, job_id: str) -> Optional[Job]:
+        requested = str(job_id or "").strip()
+        if not requested:
+            return None
         async with self._lock:
-            return self._jobs.get(job_id)
+            live = self._jobs.get(requested)
+            if live is not None:
+                return live
+        if self.store is None:
+            return None
+        payload = await self.store.get_task(requested)
+        if payload is None:
+            return None
+        return job_from_stored_payload(payload)
 
     async def list_jobs(self, *, limit: int = 100) -> list[Job]:
         async with self._lock:
@@ -386,6 +401,11 @@ class JobManager:
         positive_prompt_node = job.prompt_node or (spec.prompt_node if spec is not None else "") or None
         negative_prompt_node = job.negative_prompt_node or (spec.negative_prompt_node if spec is not None else "") or None
         image_node = job.image_node or (spec.image_node if spec is not None else "") or None
+        request_params = dict(job.standard_params or {})
+        if spec is not None and "seed" in spec.parameters:
+            raw_seed = request_params.get("seed")
+            if raw_seed in (None, "", -1, "-1"):
+                request_params["seed"] = random.randint(0, 2**32 - 1)
 
         prompt_graph, extra_data, applied, prompt_trace = prepare_prompt(
             workflow_obj=job_obj,
@@ -398,7 +418,7 @@ class JobManager:
             overrides=resolve_standard_overrides(
                 workflow_obj=job_obj,
                 spec=wf.parameter_spec,
-                request_params=job.standard_params,
+                request_params=request_params,
             )
             + list(job.overrides or []),
         )
@@ -473,7 +493,11 @@ class JobManager:
                     )
                     history = await hist_task
                     break
-                history = await hist_task
+                history = await self._history_after_ws(
+                    client=client,
+                    prompt_id=qp.prompt_id,
+                    hist_task=hist_task,
+                )
                 break
 
             if hist_task in done:
@@ -528,6 +552,26 @@ class JobManager:
         if job:
             job.done.set()
 
+    async def _history_after_ws(
+        self,
+        *,
+        client: ComfyUIClient,
+        prompt_id: str,
+        hist_task: asyncio.Task[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        entry = await client.get_history_entry(prompt_id)
+        if entry:
+            error = history_entry_error(entry)
+            if error:
+                hist_task.cancel()
+                await asyncio.gather(hist_task, return_exceptions=True)
+                raise ComfyApiError(error)
+            if history_entry_is_complete(entry):
+                hist_task.cancel()
+                await asyncio.gather(hist_task, return_exceptions=True)
+                return entry
+        return await hist_task
+
     async def _monitor_ws(self, *, job_id: str, client: ComfyUIClient, client_id: str, prompt_id: str) -> None:
         async for msg in client.ws_events(client_id=client_id):
             await self._publish(job_id, {"type": "comfyui_ws", "data": msg})
@@ -542,6 +586,11 @@ class JobManager:
                     return
                 await self._update(job_id, status="running", current_node=str(node))
                 await self._publish(job_id, {"type": "job_running", "data": {"node": str(node)}})
+            elif mtype == "execution_success" and isinstance(data, dict):
+                pid = data.get("prompt_id")
+                if pid and pid != prompt_id:
+                    continue
+                return
             elif mtype == "progress" and isinstance(data, dict):
                 await self._update(job_id, progress=data)
                 await self._publish(job_id, {"type": "job_progress", "data": data})
@@ -550,6 +599,61 @@ class JobManager:
                 if pid and pid != prompt_id:
                     continue
                 raise ComfyApiError(str(data))
+
+
+def job_from_stored_payload(payload: dict[str, Any]) -> Job:
+    raw_task = payload.get("task")
+    task: dict[str, Any] = raw_task if isinstance(raw_task, dict) else {}
+    job_id = str(task.get("job_id") or "")
+    outputs: list[JobOutput] = []
+    for item in payload.get("outputs") or []:
+        if not isinstance(item, dict):
+            continue
+        filename = str(item.get("filename") or "").strip()
+        if not filename:
+            raw_url = str(item.get("url") or "").strip()
+            filename = Path(raw_url).name if raw_url else ""
+        if not filename:
+            continue
+        outputs.append(
+            JobOutput(
+                filename=filename,
+                url=str(item.get("url") or f"/runs/{job_id}/{filename}"),
+                media_type=str(item.get("media_type") or ""),
+                node_id=str(item.get("node_id") or ""),
+                output_key=str(item.get("output_key") or ""),
+            )
+        )
+
+    job = Job(
+        job_id=job_id,
+        created_at_utc=str(task.get("created_at_utc") or ""),
+        created_at=int(task.get("created_at") or 0),
+        status=str(task.get("status") or ""),
+        kind=str(task.get("kind") or ""),
+        workflow=str(task.get("workflow") or ""),
+        platform=str(task.get("platform") or "Native"),
+        requested_model=str(task.get("requested_model") or task.get("model_slug") or ""),
+        model_slug=str(task.get("model_slug") or task.get("requested_model") or ""),
+        instance_slug=str(task.get("instance_slug") or ""),
+        prompt=str(task.get("prompt_preview") or ""),
+        prompt_id=str(task.get("prompt_id") or ""),
+        queue_number=task.get("queue_number"),
+        started_at_utc=str(task.get("started_at_utc") or ""),
+        finished_at_utc=str(task.get("finished_at_utc") or ""),
+        updated_at_utc=str(task.get("updated_at_utc") or ""),
+        duration_s=task.get("duration_s"),
+        current_node=str(task.get("current_node") or ""),
+        progress=dict(task.get("progress") or {}) if isinstance(task.get("progress"), dict) else {},
+        progress_percent=int(task.get("progress_percent") or 0),
+        error=str(task.get("error") or ""),
+        request_json=dict(task.get("request_json") or {}) if isinstance(task.get("request_json"), dict) else {},
+        outputs=outputs,
+        url=str(task.get("url") or ""),
+    )
+    if job.status in {"completed", "failed"}:
+        job.done.set()
+    return job
 
 
 def _truncate_text(value: str, *, limit: int = 500) -> str:

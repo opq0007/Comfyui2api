@@ -4,7 +4,7 @@ import asyncio
 import ipaddress
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Mapping, Optional
 from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
@@ -163,9 +163,7 @@ class ComfyUIClient:
         r = await self._client.get(url, headers=self._headers({"Accept": "application/json"}))
         r.raise_for_status()
         data = r.json()
-        if isinstance(data, dict) and prompt_id in data and isinstance(data[prompt_id], dict):
-            return data[prompt_id]
-        return None
+        return extract_history_entry(data, prompt_id=prompt_id)
 
     async def view_bytes(self, *, filename: str, subfolder: str = "", folder_type: str = "output") -> bytes:
         qs = urlencode({"filename": filename, "subfolder": subfolder, "type": folder_type})
@@ -248,9 +246,65 @@ class ComfyUIClient:
         while True:
             entry = await self.get_history_entry(prompt_id)
             if entry:
-                status = entry.get("status", {})
-                if isinstance(status, dict) and status.get("completed") is True:
+                error = history_entry_error(entry)
+                if error:
+                    raise ComfyApiError(error)
+                if history_entry_is_complete(entry):
                     return entry
             if deadline is not None and asyncio.get_running_loop().time() > deadline:
                 raise TimeoutError(f"Timed out waiting for completion after {timeout_s}s (prompt_id={prompt_id}).")
             await asyncio.sleep(max(0.05, float(poll_interval_s)))
+
+
+def extract_history_entry(data: Any, *, prompt_id: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(data, dict) or not data:
+        return None
+    nested = data.get(prompt_id)
+    if isinstance(nested, dict):
+        return nested
+    if "outputs" in data or "status" in data:
+        return data
+    if len(data) == 1:
+        only = next(iter(data.values()))
+        if isinstance(only, dict) and ("outputs" in only or "status" in only):
+            return only
+    return None
+
+
+def history_entry_error(entry: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    status = entry.get("status")
+    if not isinstance(status, dict):
+        return None
+    status_str = str(status.get("status_str") or status.get("status") or "").strip().lower()
+    if status_str in {"error", "failed", "interrupted"}:
+        messages = status.get("messages")
+        if isinstance(messages, list) and messages:
+            return f"ComfyUI execution failed: {messages[-1]}"
+        return f"ComfyUI execution failed ({status_str})"
+    return None
+
+
+def history_entry_is_complete(entry: Mapping[str, Any] | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if history_entry_error(entry):
+        return False
+    status = entry.get("status")
+    if isinstance(status, dict):
+        if status.get("completed") is True:
+            return True
+        status_str = str(status.get("status_str") or status.get("status") or "").strip().lower()
+        if status_str in {"success", "completed", "complete"}:
+            return True
+    outputs = entry.get("outputs")
+    if not isinstance(outputs, dict) or not outputs:
+        return False
+    for node_out in outputs.values():
+        if not isinstance(node_out, dict):
+            continue
+        for items in node_out.values():
+            if isinstance(items, list) and any(isinstance(item, dict) and item.get("filename") for item in items):
+                return True
+    return False

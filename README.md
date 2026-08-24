@@ -53,6 +53,7 @@ uv run --locked --no-sync -m comfyui2api serve
 **一键脚本的自动化特性：**
 - 使用 `uv sync --locked` 管理项目虚拟环境与依赖。
 - 默认使用项目级 `.venv\Scripts\python.exe` 作为运行解释器。
+- `/ui` 静态资源缺失时会自动执行 `scripts\build-frontend.ps1`，把 Vite 产物同步到 `src\comfyui2api\webui_dist`，由同一个 Python 进程同时提供前端和管理 API。
 - 如果请求的端口被占用或保留，会自动回退寻找下一个可用端口（请留意终端打印的 `Listening on:` 实际端口）。
 
 **常用启动参数示例：**
@@ -105,6 +106,9 @@ uv run --locked --no-sync -m comfyui2api serve
 | `JOB_CLEANUP_INTERVAL_S`| `60` | 后台清理过期任务的扫描间隔（秒） |
 | `SIGNED_URL_SECRET` | 继承 `API_TOKEN` | 媒体下载短期签名的加密密钥 |
 | `SIGNED_URL_TTL_SECONDS` | `3600` | 生成的媒体访问链接有效期（秒） |
+| `TIMEOUT_S` | `3600` | 等待 ComfyUI 任务完成的上限（秒）；超时后任务失败 |
+| `POLL_INTERVAL_S` | `0.5` | 轮询 ComfyUI `/history` 的间隔（秒） |
+| `HTTP_TIMEOUT_S` | `600` | 访问 ComfyUI HTTP（提交 prompt、拉 history、下载输出）的单次超时（秒），默认 10 分钟 |
 
 ---
 
@@ -157,6 +161,20 @@ data/comfyui2api.db
 ```
 
 服务重启时，历史 `completed` / `failed` 任务仍可查询；重启前仍处于 `pending` / `queued` / `running` 的任务会标记为 `failed`，错误为 `Task interrupted by server restart.`。
+
+## 前端构建（源码运行 /ui）
+
+`/ui` 由 FastAPI 托管 `src/comfyui2api/webui_dist`。该目录 gitignore，源码运行前需要先编译前端。产物使用 `base: "/ui/"`，请求同源的 `/v1` 与 `/runs`，不需要再起 Vite 开发服务器。
+
+```powershell
+.\scripts\build-frontend.ps1
+```
+
+或双击 `scripts\build-frontend.bat`。`start.bat` / `start.ps1` 发现 `webui_dist/assets` 为空时也会自动跑这个脚本。已有完整资源时跳过；强制重建再手动执行上面的命令。
+
+```powershell
+.\start.ps1 -SkipFrontendBuild   # 不自动编译前端
+```
 
 ## Windows 打包
 

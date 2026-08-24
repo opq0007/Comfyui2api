@@ -13,9 +13,13 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from comfyui2api.workflow_params import (
+    WorkflowParameterDefinition,
+    WorkflowParamTarget,
+    apply_img2img_resize_params,
     detect_parameter_candidates,
     generate_parameter_template,
     load_workflow_parameter_spec,
+    normalize_parameter_value,
     resolve_standard_overrides,
 )
 
@@ -138,6 +142,203 @@ class WorkflowParameterMappingTests(unittest.TestCase):
             self.assertEqual(template["parameters"]["fps"]["default"], 12)
             self.assertEqual(template["parameters"]["duration"]["maps"][0]["transform"], "seconds_to_frames")
             self.assertEqual(template["parameters"]["duration"]["maps"][0]["fps_param"], "fps")
+
+    def test_z_image_turbo_fp16_sidecar_maps_size_n_and_seed(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "z_image_turbo_fp16.json"
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="txt2img",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "67.text")
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={"size": "768x512", "n": 3, "seed": 42, "steps": 6, "cfg": 1.5},
+        )
+        self.assertEqual(
+            overrides,
+            [
+                ("68", "width", 768),
+                ("68", "height", 512),
+                ("68", "batch_size", 3),
+                ("70", "steps", 6),
+                ("70", "cfg", 1.5),
+                ("70", "seed", 42),
+            ],
+        )
+
+        width_only = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={"width": 640, "height": 480},
+        )
+        self.assertIn(("68", "width", 640), width_only)
+        self.assertIn(("68", "height", 480), width_only)
+
+        detected = detect_parameter_candidates(workflow_obj)
+        self.assertEqual(detected["size"][0]["maps"][0]["ref"], "68.width")
+        self.assertEqual(detected["n"][0]["maps"][0]["ref"], "68.batch_size")
+        self.assertEqual(detected["seed"][0]["maps"][0]["ref"], "70.seed")
+
+    def test_kaggle_flux2_edit_sidecar_maps_second_image_and_input_count(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "kaggle_flux2_klein_9b_kv_image_edit_api.json"
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="img2img",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "135.text")
+        self.assertEqual(spec.image_node, "76.image")
+        self.assertEqual(spec.parameters["inputImgCount"].default, 1)
+
+        single = resolve_standard_overrides(workflow_obj=workflow_obj, spec=spec, request_params={})
+        self.assertIn(("705", "value", 1), single)
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={
+                "n": 2,
+                "steps": 8,
+                "cfg": 1.2,
+                "seed": 11,
+                "image2": "uploads/second.png",
+                "inputImgCount": 2,
+            },
+        )
+        self.assertEqual(
+            overrides,
+            [
+                ("129", "batch_size", 2),
+                ("137", "steps", 8),
+                ("138", "cfg", 1.2),
+                ("125", "noise_seed", 11),
+                ("718", "value", False),
+                ("81", "image", "uploads/second.png"),
+                ("705", "value", 2),
+            ],
+        )
+
+        sized = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params=apply_img2img_resize_params({"size": "1024x768"}),
+        )
+        self.assertIn(("718", "value", True), sized)
+        self.assertIn(("720", "value", 1024), sized)
+        self.assertIn(("721", "value", 768), sized)
+
+        both_dims = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params=apply_img2img_resize_params({"width": 640, "height": 480}),
+        )
+        self.assertIn(("718", "value", True), both_dims)
+        self.assertIn(("720", "value", 640), both_dims)
+        self.assertIn(("721", "value", 480), both_dims)
+
+        width_only = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params=apply_img2img_resize_params({"width": 1024, "resizeFlag": True}),
+        )
+        self.assertIn(("718", "value", False), width_only)
+        self.assertNotIn(("720", "value", 1024), width_only)
+
+    def test_kaggle_minimax_ti2v_sidecar_maps_duration_size_and_input_count(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        workflows_dir = project_root / "comfyui-api-workflows"
+        workflow_path = workflows_dir / "kaggle_minimax_h3_ti2v_api.json"
+        workflow_obj = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+        spec = load_workflow_parameter_spec(
+            workflows_dir=workflows_dir,
+            workflow_path=workflow_path,
+            expected_kind="img2video",
+        )
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompt_node, "133.prompt")
+        self.assertEqual(spec.image_node, "114.image")
+        self.assertEqual(spec.parameters["inputImgCount"].default, 0)
+
+        text_only = resolve_standard_overrides(workflow_obj=workflow_obj, spec=spec, request_params={})
+        self.assertIn(("186", "value", 0), text_only)
+
+        overrides = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={
+                "duration": 5,
+                "size": "1280x720",
+                "fps": 24,
+                "seed": 9,
+                "image2": "uploads/last.png",
+                "inputImgCount": 2,
+            },
+        )
+        self.assertIn(("135", "value", 5.0), overrides)
+        self.assertIn(("170", "value", 1280), overrides)
+        self.assertIn(("171", "value", 720), overrides)
+        self.assertIn(("132", "fps", 24.0), overrides)
+        self.assertIn(("131", "noise_seed", 9), overrides)
+        self.assertIn(("191", "image", "uploads/last.png"), overrides)
+        self.assertIn(("186", "value", 2), overrides)
+
+        three_images = resolve_standard_overrides(
+            workflow_obj=workflow_obj,
+            spec=spec,
+            request_params={"inputImgCount": 3, "image2": "uploads/last.png", "image3": "uploads/extra.png"},
+        )
+        self.assertIn(("186", "value", 3), three_images)
+        self.assertIn(("191", "image", "uploads/last.png"), three_images)
+        self.assertFalse(any(item[0] == "image3" or item[2] == "uploads/extra.png" for item in three_images))
+
+    def test_apply_img2img_resize_params_forces_flag_from_complete_size(self) -> None:
+        self.assertEqual(apply_img2img_resize_params({}), {"resizeFlag": False})
+        self.assertEqual(
+            apply_img2img_resize_params({"size": "1024x768", "resizeFlag": False}),
+            {"size": "1024x768", "resizeFlag": True},
+        )
+        self.assertEqual(
+            apply_img2img_resize_params({"width": 640, "height": 480}),
+            {"width": 640, "height": 480, "resizeFlag": True},
+        )
+        self.assertEqual(
+            apply_img2img_resize_params({"width": 1024, "resizeFlag": True}),
+            {"resizeFlag": False},
+        )
+        self.assertEqual(
+            apply_img2img_resize_params({"size": "  ", "width": "", "resizeFlag": True}),
+            {"size": "  ", "width": "", "resizeFlag": False},
+        )
+
+    def test_bool_parameter_normalizes_common_truthy_values(self) -> None:
+        spec = WorkflowParameterDefinition(
+            name="resizeFlag",
+            type="bool",
+            maps=(WorkflowParamTarget(ref="718.value"),),
+        )
+        self.assertIs(normalize_parameter_value(spec, True), True)
+        self.assertIs(normalize_parameter_value(spec, "false"), False)
+        self.assertIs(normalize_parameter_value(spec, 1), True)
+        self.assertIs(normalize_parameter_value(spec, "0"), False)
+        with self.assertRaises(ValueError):
+            normalize_parameter_value(spec, "yes")
 
     def test_sidecar_mapping_loads_explicit_prompt_and_image_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

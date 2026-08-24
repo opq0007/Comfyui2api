@@ -285,6 +285,53 @@ class OutputAccessTests(unittest.TestCase):
         self.assertEqual(params["exp"], ["1700003600"])
         self.assertEqual(payload["expires_at"], 1700003600)
 
+    def test_runs_output_serves_historical_job_from_store_after_memory_miss(self) -> None:
+        import asyncio
+
+        from comfyui2api.jobs import Job, JobOutput
+
+        job_id = "job-historical-run"
+        out_dir = self.runs_dir / job_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "preview.png").write_bytes(b"historical-image")
+
+        job = Job(
+            job_id=job_id,
+            created_at_utc="2026-03-19T00:00:00Z",
+            created_at=123,
+            status="completed",
+            kind="txt2img",
+            workflow=self.workflow_name,
+            url=f"/runs/{job_id}/preview.png",
+            outputs=[
+                JobOutput(
+                    filename="preview.png",
+                    url=f"/runs/{job_id}/preview.png",
+                    media_type="image/png",
+                    node_id="2",
+                    output_key="images",
+                )
+            ],
+        )
+        asyncio.run(self.app.state.job_store.upsert_job(job))
+        asyncio.run(self.app.state.job_store.replace_outputs(job.job_id, job.outputs))
+
+        with patch("comfyui2api.signed_urls.utc_now_unix", return_value=1_700_000_000):
+            detail = self.client.get(
+                f"/v1/admin/tasks/{job_id}",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+        self.assertEqual(detail.status_code, 200)
+        signed_url = detail.json()["outputs"][0]["url"]
+        parsed = urlparse(signed_url)
+
+        with patch("comfyui2api.signed_urls.utc_now_unix", return_value=1_700_000_000):
+            response = self.client.get(f"{parsed.path}?{parsed.query}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"historical-image")
+        self.assertEqual(response.headers["content-type"], "image/png")
+
 
 if __name__ == "__main__":
     unittest.main()
