@@ -3,16 +3,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ImagePlus, KeyRound, LoaderCircle, Play } from "lucide-react";
 import {
   getPublicJob,
-  getPublicVideo,
   listPublicModels,
   PublicAuthError,
   submitPlayground,
   type PlaygroundKind,
   type PlaygroundRequestTrace,
   type PublicJob,
+  type PublicJobWsEvent,
   type PublicModel,
-  type PublicVideo
+  type PublicVideo,
+  type TaskOutput
 } from "../lib/api";
+import { connectPublicJobSocket, type PublicJobSocket } from "../lib/websocket";
 import { clearApiToken, getApiToken, setApiToken } from "../lib/auth";
 import { asJson } from "../lib/format";
 import { kindLabels } from "./status-badge";
@@ -112,55 +114,130 @@ export function PlaygroundPanel(): React.ReactElement {
     setFields((current) => ({ ...current, model: "" }));
   }, [fields.model, filteredModels]);
 
+  // Live status for a submitted job/video. Use the push-based per-job WebSocket
+  // (one event per actual state change) instead of polling HTTP every 1.5s for
+  // the whole generation. If WS is unavailable/fails repeatedly, fall back to
+  // a slower HTTP poll so the progress bar still advances.
   useEffect(() => {
     const jobId = job?.job_id;
+    const isVideoLive = video && video.status !== "completed" && video.status !== "failed";
     if (!jobId || job.status === "completed" || job.status === "failed") return;
-    let cancelled = false;
-    const tick = async (): Promise<void> => {
-      try {
-        const next = await getPublicJob(jobId);
-        if (!cancelled) setJob(next);
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof PublicAuthError) {
-          setApiTokenNeeded(true);
-          return;
-        }
-        setError(err instanceof Error ? err.message : "任务查询失败");
-      }
-    };
-    const id = window.setInterval(() => void tick(), 1500);
-    void tick();
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [job?.job_id, job?.status]);
 
-  useEffect(() => {
-    const videoId = video?.id;
-    if (!videoId || video.status === "completed" || video.status === "failed") return;
+    const token = getApiToken();
     let cancelled = false;
-    const tick = async (): Promise<void> => {
-      try {
-        const next = await getPublicVideo(videoId);
-        if (!cancelled) setVideo(next);
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof PublicAuthError) {
-          setApiTokenNeeded(true);
-          return;
+    let socket: PublicJobSocket | null = null;
+    let pollTimer = 0;
+    let reconnectTimer = 0;
+    let attempt = 0;
+    let fallbackActive = false;
+
+    const applyWsEvent = (entry: PublicJobWsEvent): void => {
+      switch (entry.type) {
+        case "job_snapshot":
+          setJob(entry.data);
+          break;
+        case "job_completed": {
+          // Delta: url + outputs on top of the existing snapshot.
+          const url = entry.data.url ?? null;
+          const outputs = entry.data.outputs ?? [];
+          setJob((current) =>
+            current ? { ...current, status: "completed", url, outputs } : current
+          );
+          if (isVideoLive && url) {
+            setVideo((current) => (current ? { ...current, status: "completed", url } : current));
+          }
+          break;
         }
-        setError(err instanceof Error ? err.message : "视频查询失败");
+        case "job_progress": {
+          const value = Number(entry.data.value ?? 0);
+          const max = Number(entry.data.max ?? 0);
+          const percent = max > 0 ? Math.max(0, Math.min(99, Math.round((value / max) * 100))) : 0;
+          setJob((current) => (current ? { ...current, progress_percent: percent } : current));
+          if (isVideoLive) setVideo((current) => (current ? { ...current, progress: percent } : current));
+          break;
+        }
+        case "job_running":
+          setJob((current) => (current ? { ...current, status: "running", current_node: entry.data.node ?? null } : current));
+          if (isVideoLive && video?.status !== "running") {
+            setVideo((current) => (current ? { ...current, status: "in_progress" } : current));
+          }
+          break;
+        case "job_queued":
+          setJob((current) => (current ? { ...current, status: "queued" } : current));
+          break;
+        case "job_failed":
+          setJob((current) => (current ? { ...current, status: "failed", error: entry.data.error ?? null } : current));
+          if (isVideoLive) {
+            setVideo((current) => (current ? { ...current, status: "failed", error: { message: entry.data.error ?? "" } } : current));
+          }
+          break;
+        case "error":
+          setError(entry.data.message ?? "任务查询失败");
+          break;
+        default:
+          break;
       }
     };
-    const id = window.setInterval(() => void tick(), 1500);
-    void tick();
+
+    const startFallbackPolling = (): void => {
+      if (fallbackActive) return;
+      fallbackActive = true;
+      const tick = async (): Promise<void> => {
+        if (cancelled) return;
+        try {
+          // Video is stored under its job_id alias; reuse the same public job.
+          const next = await getPublicJob(jobId);
+          if (cancelled) return;
+          setJob(next);
+          if (isVideoLive && next.status === "completed" && next.url) {
+            setVideo((current) => (current ? { ...current, status: "completed", url: next.url } : current));
+          }
+        } catch (err) {
+          if (cancelled) return;
+          if (err instanceof PublicAuthError) {
+            setApiTokenNeeded(true);
+            return;
+          }
+          setError(err instanceof Error ? err.message : "任务查询失败");
+        }
+      };
+      void tick();
+      pollTimer = window.setInterval(() => void tick(), 3000);
+    };
+
+    const open = (): void => {
+      if (cancelled) return;
+      socket = connectPublicJobSocket({
+        jobId,
+        token,
+        onOpen: () => {
+          attempt = 0;
+        },
+        onClose: () => {
+          if (cancelled) return;
+          socket = null;
+          if (!fallbackActive) {
+            const delay = Math.min(30000, 1500 * 2 ** attempt);
+            attempt += 1;
+            reconnectTimer = window.setTimeout(() => {
+              if (!cancelled) open();
+            }, delay);
+            // Give up on WS after a few attempts and degrade to polling.
+            if (attempt >= 5) startFallbackPolling();
+          }
+        },
+        onEvent: applyWsEvent
+      });
+    };
+    open();
+
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      window.clearTimeout(reconnectTimer);
+      window.clearInterval(pollTimer);
+      socket?.close();
     };
-  }, [video?.id, video?.status]);
+  }, [job?.job_id, job?.status, video?.status]);
 
   async function handleSubmit(event: React.FormEvent): Promise<void> {
     event.preventDefault();

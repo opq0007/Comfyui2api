@@ -59,6 +59,7 @@ class JobStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(detail)
             assert detail is not None
             self.assertEqual(detail["outputs"][0]["media_type"], "image/png")
+            await store.aclose()
 
     async def test_mark_unfinished_interrupted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,6 +83,7 @@ class JobStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(detail["task"]["status"], "failed")
             self.assertEqual(detail["task"]["error"], "Task interrupted by server restart.")
             self.assertEqual(detail["task"]["progress_percent"], 100)
+            await store.aclose()
 
     async def test_progress_percent_calculation(self) -> None:
         self.assertEqual(progress_percent_from_progress({"value": 3, "max": 10}, status="running"), 30)

@@ -52,13 +52,15 @@ class InstancePool:
         self._lock = asyncio.Lock()
         self._runtimes: dict[str, InstanceRuntime] = {}
         self._cursors: dict[str, str | None] = {}
+        # Slot events start CLEARED: an event only signals a real transition (a
+        # slot was freed / an instance recovered). Pre-setting it made
+        # `wait_for_slot` return immediately forever, turning the job scheduler
+        # into a busy-spin idle loop.
         self._slot_event = asyncio.Event()
-        self._slot_event.set()
         self._rng = random.Random()
 
     def _reset_slot_event(self) -> None:
         self._slot_event = asyncio.Event()
-        self._slot_event.set()
 
     async def start(self) -> None:
         self._reset_slot_event()

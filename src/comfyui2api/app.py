@@ -488,6 +488,7 @@ def create_app() -> FastAPI:
             await asyncio.gather(t, return_exceptions=True)
         await jobs.stop_workers()
         await pool.aclose()
+        await store.aclose()
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:

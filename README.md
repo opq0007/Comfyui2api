@@ -107,7 +107,9 @@ uv run --locked --no-sync -m comfyui2api serve
 | `SIGNED_URL_SECRET` | 继承 `API_TOKEN` | 媒体下载短期签名的加密密钥 |
 | `SIGNED_URL_TTL_SECONDS` | `3600` | 生成的媒体访问链接有效期（秒） |
 | `TIMEOUT_S` | `3600` | 等待 ComfyUI 任务完成的上限（秒）；超时后任务失败 |
-| `POLL_INTERVAL_S` | `0.5` | 轮询 ComfyUI `/history` 的间隔（秒） |
+| `POLL_INTERVAL_S` | `0.5` | WS 断开后回退轮询 ComfyUI `/history` 的间隔（秒）。WS 正常时不会触发 |
+| `SCHEDULER_WAKE_INTERVAL_S` | `1.0` | 任务排队阻塞（等待空槽）时调度器的重试/唤醒间隔（秒）。空闲时调度器无开销 |
+| `GLOBAL_BROADCAST_INTERVAL_S` | `1.0` | 全局面板快照广播最小间隔（秒）；progress/comfyui_ws 高频遥测按此聚合，状态转换不受限 |
 | `HTTP_TIMEOUT_S` | `600` | 访问 ComfyUI HTTP（提交 prompt、拉 history、下载输出）的单次超时（秒），默认 10 分钟 |
 
 ---

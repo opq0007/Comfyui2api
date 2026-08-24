@@ -62,7 +62,16 @@ class JobScheduler:
             if self._wake is None:
                 self._wake = asyncio.Event()
             self._wake.clear()
-            timeout_s = min(1.0, max(0.05, float(self.manager.cfg.poll_interval_s)))
+            if not self._queued:
+                # Idle: no queued jobs. Block on _wake until a job is actually
+                # enqueued — no periodic wake, no busy-spin. This is the idle
+                # fast path that previously spun because `wait_for_slot` returned
+                # immediately on a pre-set event.
+                await self._wake.wait()
+                continue
+            # Queued jobs but all current instances are busy / unavailable: wait
+            # for a slot to free OR a wake, with a bounded re-check interval.
+            timeout_s = min(1.0, max(0.05, float(self.manager.cfg.scheduler_wake_interval_s)))
             wait_wake = asyncio.create_task(self._wake.wait())
             wait_slot = asyncio.create_task(pool.wait_for_slot(timeout_s))
             _done, pending = await asyncio.wait({wait_wake, wait_slot}, return_when=asyncio.FIRST_COMPLETED)

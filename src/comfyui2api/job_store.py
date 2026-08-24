@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +17,7 @@ class JobStore:
     def __init__(self, database_path: Path) -> None:
         self.database_path = Path(database_path)
         self._lock = asyncio.Lock()
+        self._conn: sqlite3.Connection | None = None
 
     async def init(self) -> None:
         await self._run_sync(self._init_sync)
@@ -66,14 +66,28 @@ class JobStore:
             return await asyncio.to_thread(fn, *args)
 
     def _connect(self) -> sqlite3.Connection:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        con = sqlite3.connect(str(self.database_path))
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA foreign_keys = ON")
-        return con
+        # Reuse a single connection instead of opening + closing one per call.
+        # All DB ops are serialized behind `self._lock` (see `_run_sync`), so a
+        # persistent connection is not concurrently used. `check_same_thread=False`
+        # lets the small to_thread pool share it without a per-call connection.
+        if self._conn is None:
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(self.database_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.execute("PRAGMA journal_mode = WAL")
+        return self._conn
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                finally:
+                    self._conn = None
 
     def _init_sync(self) -> None:
-        with closing(self._connect()) as con:
+        with self._connect() as con:
             con.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -133,7 +147,7 @@ class JobStore:
 
     def _upsert_job_sync(self, job: Job) -> None:
         payload = _job_to_row(job)
-        with closing(self._connect()) as con:
+        with self._connect() as con:
             con.execute(
                 """
                 INSERT INTO tasks (
@@ -177,7 +191,7 @@ class JobStore:
             con.commit()
 
     def _replace_outputs_sync(self, job_id: str, outputs: list[JobOutput]) -> None:
-        with closing(self._connect()) as con:
+        with self._connect() as con:
             con.execute("DELETE FROM task_outputs WHERE job_id = ?", (job_id,))
             con.executemany(
                 """
@@ -200,7 +214,7 @@ class JobStore:
             con.commit()
 
     def _get_task_sync(self, job_id: str) -> dict[str, Any] | None:
-        with closing(self._connect()) as con:
+        with self._connect() as con:
             row = con.execute("SELECT * FROM tasks WHERE job_id = ?", (job_id,)).fetchone()
             if row is None:
                 return None
@@ -235,7 +249,7 @@ class JobStore:
             platforms=platforms,
         )
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
-        with closing(self._connect()) as con:
+        with self._connect() as con:
             total = int(con.execute(f"SELECT COUNT(*) FROM tasks{where_sql}", params).fetchone()[0])
             rows = con.execute(
                 f"""
@@ -257,7 +271,7 @@ class JobStore:
         return {"total": total, "counts": counts, "items": items}
 
     def _stats_sync(self) -> dict[str, Any]:
-        with closing(self._connect()) as con:
+        with self._connect() as con:
             rows = con.execute("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").fetchall()
         counts = {status: 0 for status in STATUSES}
         for row in rows:
@@ -267,7 +281,7 @@ class JobStore:
     def _mark_unfinished_interrupted_sync(self) -> None:
         now_iso = utc_now_iso()
         now_unix = utc_now_unix()
-        with closing(self._connect()) as con:
+        with self._connect() as con:
             con.execute(
                 """
                 UPDATE tasks

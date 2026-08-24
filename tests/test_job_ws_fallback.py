@@ -149,7 +149,10 @@ class JobWebsocketFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.status, "completed")
         self.assertTrue(updated.done.is_set())
         self.assertEqual(len(updated.outputs), 1)
-        client.wait_for_history_complete.assert_called()
+        # New contract: history polling is NOT started eagerly when the WS
+        # monitor completes successfully. The final history record is fetched
+        # once (via get_history_entry); the bounded poller is only a fallback.
+        client.wait_for_history_complete.assert_not_called()
         client.get_history_entry.assert_awaited()
 
 

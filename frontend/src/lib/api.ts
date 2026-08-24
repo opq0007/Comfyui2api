@@ -177,6 +177,46 @@ export interface PublicVideo {
   error?: { message?: string } | null;
 }
 
+// Events pushed on the per-job WebSocket `GET /v1/jobs/{job_id}/ws`. The
+// initial snapshot carries the full `PublicJob`; subsequent events carry
+// deltas (progress, node, status transitions, final outputs).
+export interface PublicJobSnapshotEvent {
+  type: "job_snapshot";
+  data: PublicJob;
+}
+export interface PublicJobProgressEvent {
+  type: "job_progress";
+  data: Record<string, unknown>;
+}
+export interface PublicJobRunningEvent {
+  type: "job_running";
+  data: { node?: string | null };
+}
+export interface PublicJobQueuedEvent {
+  type: "job_queued";
+  data: { client_id?: string; workflow?: string };
+}
+export interface PublicJobCompletedEvent {
+  type: "job_completed";
+  data: { url?: string | null; outputs?: TaskOutput[] };
+}
+export interface PublicJobFailedEvent {
+  type: "job_failed";
+  data: { error?: string };
+}
+export interface PublicJobWsErrorEvent {
+  type: "error";
+  data: { message?: string };
+}
+export type PublicJobWsEvent =
+  | PublicJobSnapshotEvent
+  | PublicJobProgressEvent
+  | PublicJobRunningEvent
+  | PublicJobQueuedEvent
+  | PublicJobCompletedEvent
+  | PublicJobFailedEvent
+  | PublicJobWsErrorEvent;
+
 export interface PlaygroundRequestTrace {
   method: string;
   path: string;
@@ -268,6 +308,15 @@ export async function shutdownApp(): Promise<{ status: string }> {
 export function adminWsUrl(token: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL("/v1/admin/tasks/ws", `${protocol}//${window.location.host}`);
+  if (token) url.searchParams.set("token", token);
+  return url.toString();
+}
+
+/** Per-job public WS endpoint. Browsers cannot set WS headers, so the API
+ * token is passed as `?token=` (the WS auth parser accepts both). */
+export function publicJobWsUrl(jobId: string, token: string): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`/v1/jobs/${encodeURIComponent(jobId)}/ws`, `${protocol}//${window.location.host}`);
   if (token) url.searchParams.set("token", token);
   return url.toString();
 }

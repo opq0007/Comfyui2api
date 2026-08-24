@@ -4,6 +4,7 @@ import asyncio
 import copy
 import logging
 import random
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,6 +111,12 @@ class JobManager:
         self._sub_lock = asyncio.Lock()
         self._global_subscribers: set[Any] = set()
         self._global_sub_lock = asyncio.Lock()
+        self._last_global_broadcast: float = 0.0
+
+    # High-frequency telemetry that is broadcast at most once per
+    # `global_broadcast_interval_s` to the global dashboard, instead of on every
+    # sampler-step event. Terminal / status transitions are never throttled.
+    _THROTTLED_GLOBAL_EVENTS = frozenset({"comfyui_ws", "job_progress"})
 
     async def start_workers(self) -> None:
         await self.scheduler.start()
@@ -270,7 +277,7 @@ class JobManager:
                 await self.unsubscribe(job_id, ws)
         await self._publish_global_snapshot(job_id, event_type=str(event.get("type") or "task_updated"))
 
-    async def _update(self, job_id: str, **fields: Any) -> Optional[Job]:
+    async def _update(self, job_id: str, *, persist: bool = True, **fields: Any) -> Optional[Job]:
         async with self._lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -279,7 +286,8 @@ class JobManager:
                 setattr(job, k, v)
             self._apply_derived_fields(job, fields)
             updated = job
-        await self._persist_job(updated)
+        if persist:
+            await self._persist_job(updated)
         if "outputs" in fields and self.store is not None:
             await self.store.replace_outputs(job_id, updated.outputs or [])
         return updated
@@ -340,6 +348,17 @@ class JobManager:
             sockets = list(self._global_subscribers)
         if not sockets:
             return
+        # High-frequency telemetry (per sampler step) is throttled to a single
+        # aggregated broadcast within `global_broadcast_interval_s` instead of
+        # re-serializing + sending the whole job to every dashboard per event.
+        # Terminal / status transitions always go through immediately.
+        if event_type in self._THROTTLED_GLOBAL_EVENTS:
+            now = time.monotonic()
+            async with self._lock:
+                last = getattr(self, "_last_global_broadcast", 0.0)
+                if now - last < self.cfg.global_broadcast_interval_s:
+                    return
+                self._last_global_broadcast = now
         job = await self.get_job(job_id)
         if job is None:
             return
@@ -466,45 +485,39 @@ class JobManager:
         )
         await self._update(job_id, run_dir=str(run_dir))
 
+        # The WebSocket monitor is the live, push-based progress source. Do NOT
+        # run a redundant `/history` poller concurrently — that hammered ComfyUI
+        # every `poll_interval_s` (default 0.5s) for the whole duration of every
+        # job even while WS events were flowing. Only fall back to history
+        # polling if the WS monitor ends without a successful completion.
         ws_task = asyncio.create_task(
             self._monitor_ws(job_id=job_id, client=client, client_id=client_id, prompt_id=qp.prompt_id),
             name=f"job-ws-{job_id[:8]}",
         )
-        hist_task = asyncio.create_task(
-            client.wait_for_history_complete(
-                prompt_id=qp.prompt_id, timeout_s=self.cfg.timeout_s, poll_interval_s=self.cfg.poll_interval_s
-            ),
-            name=f"job-hist-{job_id[:8]}",
-        )
-
         history: Dict[str, Any]
-        while True:
-            done, pending = await asyncio.wait({ws_task, hist_task}, return_when=asyncio.FIRST_COMPLETED)
-
-            if ws_task in done:
-                exc = ws_task.exception()
-                if exc:
-                    logger.warning(
-                        "job websocket monitor failed, continuing with history polling: job_id=%s client_id=%s prompt_id=%s",
-                        job_id,
-                        client_id,
-                        qp.prompt_id,
-                        exc_info=exc,
-                    )
-                    history = await hist_task
-                    break
-                history = await self._history_after_ws(
-                    client=client,
-                    prompt_id=qp.prompt_id,
-                    hist_task=hist_task,
-                )
-                break
-
-            if hist_task in done:
-                history = hist_task.result()
-                ws_task.cancel()
-                await asyncio.gather(ws_task, return_exceptions=True)
-                break
+        ws_error: BaseException | None = None
+        try:
+            await ws_task
+        except BaseException as exc:  # noqa: BLE001 - propagate after fallback
+            ws_error = exc
+        if ws_error is not None:
+            logger.warning(
+                "job websocket monitor failed, continuing with history polling: job_id=%s client_id=%s prompt_id=%s exc=%r",
+                job_id,
+                client_id,
+                qp.prompt_id,
+                ws_error,
+            )
+            history = await client.wait_for_history_complete(
+                prompt_id=qp.prompt_id, timeout_s=self.cfg.timeout_s, poll_interval_s=self.cfg.poll_interval_s
+            )
+        else:
+            history = await self._history_after_ws(
+                client=client,
+                prompt_id=qp.prompt_id,
+                timeout_s=self.cfg.timeout_s,
+                poll_interval_s=self.cfg.poll_interval_s,
+            )
 
         (run_dir / "history.json").write_text(json_dumps(history) + "\n", encoding="utf-8")
 
@@ -557,20 +570,21 @@ class JobManager:
         *,
         client: ComfyUIClient,
         prompt_id: str,
-        hist_task: asyncio.Task[Dict[str, Any]],
+        timeout_s: int,
+        poll_interval_s: float,
     ) -> Dict[str, Any]:
         entry = await client.get_history_entry(prompt_id)
         if entry:
             error = history_entry_error(entry)
             if error:
-                hist_task.cancel()
-                await asyncio.gather(hist_task, return_exceptions=True)
                 raise ComfyApiError(error)
             if history_entry_is_complete(entry):
-                hist_task.cancel()
-                await asyncio.gather(hist_task, return_exceptions=True)
                 return entry
-        return await hist_task
+        # WS reported completion but history is not final yet (or the WS ended
+        # without a terminal signal). Fall back to bounded history polling.
+        return await client.wait_for_history_complete(
+            prompt_id=prompt_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s
+        )
 
     async def _monitor_ws(self, *, job_id: str, client: ComfyUIClient, client_id: str, prompt_id: str) -> None:
         async for msg in client.ws_events(client_id=client_id):
@@ -584,7 +598,9 @@ class JobManager:
                     continue
                 if node is None:
                     return
-                await self._update(job_id, status="running", current_node=str(node))
+                # Persist the transitioning node id (rare), but do not write
+                # SQLite for every progress message.
+                await self._update(job_id, status="running", current_node=str(node), persist=True)
                 await self._publish(job_id, {"type": "job_running", "data": {"node": str(node)}})
             elif mtype == "execution_success" and isinstance(data, dict):
                 pid = data.get("prompt_id")
@@ -592,7 +608,11 @@ class JobManager:
                     continue
                 return
             elif mtype == "progress" and isinstance(data, dict):
-                await self._update(job_id, progress=data)
+                # Progress updates are high-frequency (per sampler step). Update
+                # only the in-memory job + WS push; defer the SQLite write to a
+                # terminal/status transition. This removes a full-row upsert +
+                # new sqlite connection per progress event.
+                await self._update(job_id, progress=data, persist=False)
                 await self._publish(job_id, {"type": "job_progress", "data": data})
             elif mtype == "execution_error" and isinstance(data, dict):
                 pid = data.get("prompt_id")

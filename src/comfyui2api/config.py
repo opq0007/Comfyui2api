@@ -82,6 +82,9 @@ class Config:
     poll_interval_s: float
     http_timeout_s: int
 
+    scheduler_wake_interval_s: float
+    global_broadcast_interval_s: float
+
     enable_workflow_watch: bool
     job_retention_seconds: int
     max_jobs_in_memory: int
@@ -135,6 +138,8 @@ def load_config() -> Config:
         timeout_s=_env_int("TIMEOUT_S", 3600),
         poll_interval_s=_env_float("POLL_INTERVAL_S", 0.5),
         http_timeout_s=_env_int("HTTP_TIMEOUT_S", 600),
+        scheduler_wake_interval_s=max(0.05, _env_float("SCHEDULER_WAKE_INTERVAL_S", 1.0)),
+        global_broadcast_interval_s=max(0.05, _env_float("GLOBAL_BROADCAST_INTERVAL_S", 1.0)),
         enable_workflow_watch=_env_bool("ENABLE_WORKFLOW_WATCH", True),
         job_retention_seconds=_job_retention_seconds(),
         max_jobs_in_memory=max(0, _env_int("MAX_JOBS_IN_MEMORY", 1000)),
