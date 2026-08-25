@@ -278,6 +278,24 @@ if [ "$CheckOnly" -eq 1 ]; then
     exit 0
 fi
 
+# Decide launch mode from the resolved listen host.
+#   - Loopback (127.0.0.1 / ::1 / localhost): keep `ui` mode so the dashboard
+#     is served and the browser is opened (matches start.ps1 behaviour).
+#   - Anything else (0.0.0.0, LAN IP, etc.): use `serve` so the process binds
+#     the external interface and API_LISTEN / API_PORT actually take effect.
+#     Bare `python -m comfyui2api` defaults to `ui` mode which hard-codes
+#     127.0.0.1 and would silently ignore API_LISTEN (=> not reachable remotely).
+is_loopback() {
+    local h="$1"
+    [[ "$h" == "127.0.0.1" || "$h" == "localhost" || "$h" == "::1" || "$h" == "0:0:0:0:0:0:0:1" ]]
+}
+
 warn "Starting comfyui2api ..."
-"$uv_exe" run --locked --no-sync -m comfyui2api
+if is_loopback "$resolved_host"; then
+    warn "Listen host is loopback; starting in 'ui' mode (127.0.0.1)."
+    "$uv_exe" run --locked --no-sync -m comfyui2api
+else
+    warn "Listen host is non-loopback; starting in 'serve' mode ($resolved_host:$resolved_port)."
+    "$uv_exe" run --locked --no-sync -m comfyui2api serve --host "$resolved_host" --port "$resolved_port"
+fi
 exit 0
