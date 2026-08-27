@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "kind": "txt2img",
+  "prompt_node": "67.text",
+  "parameters": {
+    "size": {
+      "type": "size",
+      "description": "Image size as WIDTHxHEIGHT.",
+      "maps": [
+        {
+          "target": "68.width",
+          "part": "width"
+        },
+        {
+          "target": "68.height",
+          "part": "height"
+        }
+      ]
+    },
+    "width": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output width.",
+      "maps": [
+        {
+          "target": "68.width"
+        }
+      ]
+    },
+    "height": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Output height.",
+      "maps": [
+        {
+          "target": "68.height"
+        }
+      ]
+    },
+    "n": {
+      "type": "int",
+      "minimum": 1,
+      "maximum": 16,
+      "description": "Number of images / latent batch size.",
+      "maps": [
+        {
+          "target": "68.batch_size"
+        }
+      ]
+    },
+    "steps": {
+      "type": "int",
+      "minimum": 1,
+      "description": "Sampler steps.",
+      "maps": [
+        {
+          "target": "70.steps"
+        }
+      ]
+    },
+    "cfg": {
+      "type": "float",
+      "description": "CFG / guidance scale.",
+      "maps": [
+        {
+          "target": "70.cfg"
+        }
+      ]
+    },
+    "seed": {
+      "type": "int",
+      "description": "Random seed. Omit or pass -1 to randomize each job.",
+      "maps": [
+        {
+          "target": "70.seed"
+        }
+      ]
+    }
+  }
+}
